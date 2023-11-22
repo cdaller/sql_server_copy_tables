@@ -18,20 +18,23 @@ target_config = {
     'server': 'localhost',
     'database': 'liferay-db',
     'user': 'sa',
-    'password': 'xxx',
+    'password': 'x',
     'schema': 'HEIDETRANSFER'
 }
 
 table_names = [
-            # 'D7ADRESS', 
-            'DH7ANS', 
-            # 'DH7EINH', 
-               'DH7MES', 
-               'DH7NUTZ', 'DH7OBJ' 'PORTALFLAG', 
-            #    'REP_CRE_KV', 'REP_CRE_MASTER3A', 
-            #    'REP_CRE_MASTER3B', 
-            #    'REP_CRE_MASTER3C', 
-            #    'REP_CRE_MP', 'REP_CRE_OB_KZ', 'REP_CRE_VAZ'
+            # 'D7ADRESS', #done
+            # 'DH7ANS', # done
+            # 'DH7EINH', # done
+            #'DH7MES', # done with paging
+            # 'DH7NUTZ', # done
+            # 'DH7OBJ', # done 
+            # 'PORTALFLAG', # done
+            # 'REP_CRE_KV', # done (removed 'identity'))
+            'REP_CRE_MASTER3A', 
+            'REP_CRE_MASTER3B', 
+            'REP_CRE_MASTER3C', 
+            # 'REP_CRE_MP', 'REP_CRE_OB_KZ', 'REP_CRE_VAZ'
                ]
 
 # Function to create a connection
@@ -49,32 +52,63 @@ def get_create_table_query(source_cursor, schema_name, table_name):
 
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema):
-    print(f"Copying table {table_name} ...", end="")
+    print(f"Copying table {table_name} ...", end="", flush=True)
     start_time = perf_counter()
 
     source_cursor = source_conn.cursor()
     target_cursor = target_conn.cursor()
 
-    # Fetch data from source table
-    source_cursor.execute(f"SELECT * FROM {source_schema}.{table_name}")
-    rows = source_cursor.fetchall()
-    row_count = len(rows)
-    
-    # Insert data into target table
-    placeholders = ', '.join(['?' for _ in rows[0]])
-    target_cursor.fast_executemany = True
-    target_cursor.executemany(f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})", rows)
-    target_conn.commit()
-    duration_sec = perf_counter() - start_time
-    rows_per_sec = int(round(row_count / duration_sec))
-    print(f" - done in {duration_sec:.1f} seconds for {row_count} rows ({rows_per_sec} rows/sec)")
+    total_row_count = get_row_count(source_conn, source_schema, table_name)
+    print(f" {total_row_count} rows ...", end="")
 
-def truncate_table(sql_conn, schema_name, table_name):
-    print(f"Truncating table {table_name} ...", end="")
-    cursor = sql_conn.cursor()
+    page_size = 500000
+    page_count = 0
+    offset = 0
+
+    while True:
+
+        page_count += 1
+
+        # Fetch data from source table
+        source_cursor.execute(f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT 1) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
+        rows = source_cursor.fetchall()
+
+        if not rows:
+            break  # Break the loop if there are no more rows to fetch
+
+        row_count = len(rows)
+        if row_count == page_size:
+            if page_count == 1:
+                print(f" paging {int(total_row_count / page_size)} pages each {page_size} rows, page", end="")
+            print(f" {page_count}", end="", flush=True)
+        else:
+            print(f" writing {row_count} rows ...", end="", flush=True)
+        
+        # Insert data into target table
+        placeholders = ', '.join(['?' for _ in rows[0]])
+        target_cursor.fast_executemany = True
+        target_cursor.executemany(f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})", rows)
+
+        target_conn.commit()
+
+        offset += page_size
+
+    duration_sec = perf_counter() - start_time
+    rows_per_sec = int(round(total_row_count / duration_sec))
+    print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+
+def truncate_table(connection, schema_name, table_name):
+    print(f"Truncating table {table_name} ...", end="", flush=True)
+    cursor = connection.cursor()
     cursor.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
-    sql_conn.commit()
-    print(f" - done")
+    connection.commit()
+    print(" - done")
+
+def get_row_count(connection, schema_name, table_name) -> int:
+    cursor = connection.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM  {schema_name}.{table_name}")
+    total_rows = cursor.fetchone()[0]
+    return total_rows
 
 # Main process
 try:
