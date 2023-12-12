@@ -14,6 +14,7 @@ from time import perf_counter
 import sys
 import struct
 import argparse
+import re
 
 DEFAULT_PAGE_SIZE=50000
 
@@ -44,6 +45,7 @@ def parse_args():
 
     parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
+    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match tables name). Use with "--all-tables" or one of the "list-tables" arguments.')
 
     return parser
 
@@ -276,6 +278,14 @@ def get_table_names(conn, schema):
         table_names.append(row.TABLE_NAME)
     return table_names
 
+def filter_strings_by_regex(strings, pattern):
+    if pattern is None:
+        return strings
+    regex = re.compile(pattern)
+    filtered_strings = [s for s in strings if regex.match(s)]
+    return filtered_strings
+
+
 # Main process
 if __name__ == '__main__':
     parser = parse_args()
@@ -313,8 +323,9 @@ if __name__ == '__main__':
         print(' - DONE')
 
         if ARGS.source_list_tables:
+            print(f'List of all tables (filter is applied if given):')
             table_names = get_table_names(source_conn, source_schema)
-            for table_name in table_names:
+            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter):
                 print(table_name)
             sys.exit(0)
 
@@ -323,14 +334,17 @@ if __name__ == '__main__':
         print(' - DONE')
 
         if ARGS.target_list_tables:
+            print(f'List of all tables (filter is applied if given):')
             table_names = get_table_names(target_conn, target_schema)
-            for table_name in table_names:
+            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter):
                 print(table_name)
             sys.exit(0)
 
         table_names = ARGS.tables
         if ARGS.copy_all_tables:
             table_names = get_table_names(source_conn, source_schema)
+
+        table_names = filter_strings_by_regex(table_names, ARGS.table_filter)
 
         for table_name in table_names:
             if ARGS.drop_table:
