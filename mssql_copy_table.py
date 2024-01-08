@@ -134,7 +134,29 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     create_table_statement = f"CREATE TABLE {target_schema}.{table_name} ({', '.join(column_definitions)}{pk_definition})"
     return create_table_statement
 
+# fetch input sizes for decimal columns (see https://github.com/mkleehammer/pyodbc/issues/845)
+def get_input_sizes_for_decimal(conn, schema_name, table_name):
+    cursor = conn.cursor()
+    
+    # Query column types, precision, and scale
+    cursor.execute(f"""
+        SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+    """, (schema_name, table_name))
 
+    input_sizes = []
+    for row in cursor.fetchall():
+        column_name, data_type, precision, scale = row
+        
+        # For decimal columns, add a tuple of (type, precision, scale)
+        if data_type == 'decimal':
+            input_sizes.append((pyodbc.SQL_DECIMAL, precision, scale))
+        else:
+            # For other data types, you can choose to add specific handling or use None
+            input_sizes.append(None)
+
+    return input_sizes
 
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, dry_run = False):
@@ -147,6 +169,11 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             total_row_count = get_row_count(source_conn, source_schema, table_name)
             print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="")
+
+            input_sizes = get_input_sizes_for_decimal(source_conn, source_schema, table_name)
+            target_cursor.fast_executemany = True
+            # workaround for an odbc bug that cannot handle decimal values correctly when fast_executemany is True (https://github.com/mkleehammer/pyodbc/issues/845)
+            target_cursor.setinputsizes(input_sizes)
 
             page_count = 0
             offset = 0
@@ -173,8 +200,9 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 # Insert data into target table
                 if not dry_run:
                     placeholders = ', '.join(['?' for _ in rows[0]])
-                    target_cursor.fast_executemany = True
-                    target_cursor.executemany(f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})", rows)
+                    insert_sql = f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})"
+                    #print('execute sql ' + insert_sql + str(rows))
+                    target_cursor.executemany(insert_sql, rows)
 
                     target_conn.commit()
 
