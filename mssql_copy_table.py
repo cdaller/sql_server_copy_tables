@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--target-list-tables', dest='target_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied!')
 
     parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table.')
-    parser.add_argument('--drop-table', dest='drop_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and recreate the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated it not prevented by --no-copy-indices flag')
+    parser.add_argument('--drop-table', dest='drop_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and recreate the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag')
     parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table')
     parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen')
 
@@ -254,7 +254,8 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
             for row in source_cursor:
                 index_name, columns, is_unique = row
                 unique_clause = "UNIQUE" if is_unique else ""
-                create_index_query = f"CREATE {unique_clause} INDEX {index_name} ON {target_schema}.{table_name} ({columns})"
+                create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
+                # print('create index ' + create_index_query)
                 if not dry_run:
                     target_cursor.execute(create_index_query)
 
