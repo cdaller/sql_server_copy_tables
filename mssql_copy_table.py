@@ -45,7 +45,7 @@ def parse_args():
 
     parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
-    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match tables name). Use with "--all-tables" or one of the "list-tables" arguments.')
+    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments.')
 
     return parser
 
@@ -135,29 +135,40 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     return create_table_statement
 
 # fetch input sizes for decimal columns (see https://github.com/mkleehammer/pyodbc/issues/845)
-def get_input_sizes_for_decimal(conn, schema_name, table_name):
+def get_input_sizes(conn, schema_name, table_name):
     cursor = conn.cursor()
     
-    # Query column types, precision, and scale
+    # Query column types, precision, scale, and character maximum length
     cursor.execute(f"""
-        SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE 
+        SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH 
         FROM INFORMATION_SCHEMA.COLUMNS 
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
     """, (schema_name, table_name))
 
+    # Define a large size for VARCHAR(MAX)
+    varchar_max_size = 512000  # This is a large size that is typically used to represent VARCHAR(MAX)
+
     input_sizes = []
     for row in cursor.fetchall():
-        column_name, data_type, precision, scale = row
+        column_name, data_type, precision, scale, char_max_length = row
         
-        # For decimal columns, add a tuple of (type, precision, scale)
+        # Handle decimal columns
         if data_type == 'decimal':
             input_sizes.append((pyodbc.SQL_DECIMAL, precision, scale))
+        # Handle varchar and nvarchar columns
+        # elif data_type in ['varchar', 'nvarchar']:
+        #     if char_max_length == -1:  # Indicates varchar(max) or nvarchar(max)
+        #         input_sizes.append(varchar_max_size)
+        #     else:
+        #         input_sizes.append(char_max_length)
+        # # Handle bigint columns
+        # elif data_type == 'bigint':
+        #     input_sizes.append(pyodbc.SQL_BIGINT)
         else:
             # For other data types, you can choose to add specific handling or use None
             input_sizes.append(None)
 
     return input_sizes
-
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, dry_run = False):
     print(f"Copying table {table_name} ...", end="", flush=True)
@@ -170,10 +181,12 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
             total_row_count = get_row_count(source_conn, source_schema, table_name)
             print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="")
 
-            input_sizes = get_input_sizes_for_decimal(source_conn, source_schema, table_name)
+            input_sizes = get_input_sizes(source_conn, source_schema, table_name)
             target_cursor.fast_executemany = True
             # workaround for an odbc bug that cannot handle decimal values correctly when fast_executemany is True (https://github.com/mkleehammer/pyodbc/issues/845)
             target_cursor.setinputsizes(input_sizes)
+
+            # print("input sizes: " + str(input_sizes))
 
             page_count = 0
             offset = 0
