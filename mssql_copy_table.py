@@ -225,6 +225,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     target_cursor.executemany(insert_sql, rows)
 
                     target_conn.commit()
+                    print(f".", end="", flush=True)
 
                 offset += page_size
 
