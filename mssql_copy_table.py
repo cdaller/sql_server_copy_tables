@@ -16,8 +16,6 @@ import struct
 import argparse
 import re
 
-DEFAULT_PAGE_SIZE=50000
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server', formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--source-driver', dest='source_driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver')
@@ -38,14 +36,16 @@ def parse_args():
     parser.add_argument('--target-password', dest='target_password', help='source database password, if authentication is set to UsenamePassword')
     parser.add_argument('--target-list-tables', dest='target_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied!')
 
-    parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table.')
-    parser.add_argument('--drop-table', dest='drop_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and recreate the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag')
+    parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used!')
+    parser.add_argument('--create-table', dest='create_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag')
     parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table')
     parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen')
 
     parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
     parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments.')
+    parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well.')
+
 
     return parser
 
@@ -95,7 +95,8 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
         SELECT 
             COLUMN_NAME, DATA_TYPE, 
             CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, 
-            COLUMN_DEFAULT, DATETIME_PRECISION
+            COLUMN_DEFAULT, DATETIME_PRECISION,
+            NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS 
         WHERE TABLE_SCHEMA = N'{source_schema}' AND TABLE_NAME = N'{table_name}'
     """)
@@ -104,11 +105,18 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     column_definitions = []
     for column in columns:
         col_def = f"{column.COLUMN_NAME} {column.DATA_TYPE}"
-        # Add length for character types and precision for datetime2
+
+        # Add length for character types
         if column.DATA_TYPE in ['varchar', 'nvarchar', 'char', 'nchar', 'binary', 'varbinary']:
             col_def += f"({column.CHARACTER_MAXIMUM_LENGTH})" if column.CHARACTER_MAXIMUM_LENGTH else "(max)"
+        # Add precision for datetime2
         elif column.DATA_TYPE == 'datetime2':
             col_def += f"({column.DATETIME_PRECISION})"
+        # Add precision and scale for decimal and numeric types
+        elif column.DATA_TYPE in ['decimal', 'numeric']:
+            precision = column.NUMERIC_PRECISION if column.NUMERIC_PRECISION is not None else 18  # Default precision
+            scale = column.NUMERIC_SCALE if column.NUMERIC_SCALE is not None else 0  # Default scale
+            col_def += f"({precision}, {scale})"
 
         if column.IS_NULLABLE == 'NO':
             col_def += " NOT NULL"
@@ -116,7 +124,6 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
             col_def += f" DEFAULT {column.COLUMN_DEFAULT}"
 
         column_definitions.append(col_def)
-
 
     # Get primary key information
     source_cursor.execute(f"""
@@ -179,7 +186,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         with target_conn.cursor() as target_cursor:
 
             total_row_count = get_row_count(source_conn, source_schema, table_name)
-            print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="")
+            print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
             input_sizes = get_input_sizes(source_conn, source_schema, table_name)
             target_cursor.fast_executemany = True
@@ -196,16 +203,16 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 page_count += 1
 
                 # Fetch data from source table
-                source_cursor.execute(f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT 1) OFFSET {offset} ROWS FETCH NEXT {DEFAULT_PAGE_SIZE} ROWS ONLY")
+                source_cursor.execute(f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT 1) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
                 rows = source_cursor.fetchall()
 
                 if not rows:
                     break  # Break the loop if there are no more rows to fetch
 
                 row_count = len(rows)
-                if row_count == DEFAULT_PAGE_SIZE:
+                if row_count == page_size:
                     if page_count == 1:
-                        print(f" paging {int(total_row_count / DEFAULT_PAGE_SIZE + 1)} pages each {DEFAULT_PAGE_SIZE} rows, page", end="")
+                        print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size} rows, page", end="")
                     print(f" {page_count}", end="", flush=True)
                 else:
                     print(f" writing {row_count} rows ...", end="", flush=True)
@@ -219,7 +226,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
                     target_conn.commit()
 
-                offset += DEFAULT_PAGE_SIZE
+                offset += page_size
 
             duration_sec = perf_counter() - start_time
             rows_per_sec = int(round(total_row_count / duration_sec))
@@ -333,6 +340,8 @@ if __name__ == '__main__':
     parser = parse_args()
     ARGS = parser.parse_args()
 
+    page_size = ARGS.page_size
+
     source_config = { 
         'driver': ARGS.source_driver,
         'server': ARGS.source_server,
@@ -389,13 +398,14 @@ if __name__ == '__main__':
         table_names = filter_strings_by_regex(table_names, ARGS.table_filter)
 
         for table_name in table_names:
-            if ARGS.drop_table:
-                drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
-                create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
-            if ARGS.copy_indices:
-                copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
             if ARGS.truncate_table:
                 truncate_table(target_conn, target_schema, table_name, ARGS.dry_run)
+            elif ARGS.create_table:
+                drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
+                create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+
+            if ARGS.copy_indices:
+                copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
             # Copy data from source to target
             copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
