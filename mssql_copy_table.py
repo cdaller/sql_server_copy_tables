@@ -108,7 +108,7 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
 
         # Add length for character types
         if column.DATA_TYPE in ['varchar', 'nvarchar', 'char', 'nchar', 'binary', 'varbinary']:
-            col_def += f"({column.CHARACTER_MAXIMUM_LENGTH})" if column.CHARACTER_MAXIMUM_LENGTH else "(max)"
+            col_def += f"({column.CHARACTER_MAXIMUM_LENGTH})" if column.CHARACTER_MAXIMUM_LENGTH and column.CHARACTER_MAXIMUM_LENGTH > 0 else "(max)"
         # Add precision for datetime2
         elif column.DATA_TYPE == 'datetime2':
             col_def += f"({column.DATETIME_PRECISION})"
@@ -252,6 +252,7 @@ def create_table(source_conn, target_conn, source_schema, table_name, target_sch
     with source_conn.cursor() as source_cursor:
         create_table_query = get_create_table_query(source_cursor, source_schema, table_name, target_schema)
         if not dry_run:
+            print(f'Create query: {create_table_query}')
             target_cursor = target_conn.cursor()
             target_cursor.execute(create_table_query)
         print(f"Table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
