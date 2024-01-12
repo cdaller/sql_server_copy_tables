@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
     parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments.')
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well.')
-    parser.add_argument('--start-page', dest='start_page', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table!')
+    parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table!')
 
 
     return parser
@@ -178,7 +178,7 @@ def get_input_sizes(conn, schema_name, table_name):
 
     return input_sizes
 # Function to copy data from source to target
-def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, start_page, dry_run = False):
+def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run = False):
     print(f"Copying table {table_name} ...", end="", flush=True)
     start_time = perf_counter()
 
@@ -196,8 +196,9 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             # print("input sizes: " + str(input_sizes))
 
-            page_count = start_page
-            offset = start_page * page_size
+            page_count = page_start
+            offset = page_start * page_size
+            print_page_info = True
 
             while True:
 
@@ -212,9 +213,10 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
                 row_count = len(rows)
                 if row_count == page_size:
-                    if page_count == 1:
+                    if print_page_info:
                         print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size} rows, page", end="")
-                    print(f" {page_count}", end="", flush=True)
+                        print_page_info = False
+                    print(f" {page_count}r", end="", flush=True)
                 else:
                     print(f" writing {row_count} rows ...", end="", flush=True)
                 
@@ -226,7 +228,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     target_cursor.executemany(insert_sql, rows)
 
                     target_conn.commit()
-                    print(f"w", end="", flush=True) # indicate the page is written and commited
+                    print('w', end="", flush=True) # indicate the page is written and commited
 
                 offset += page_size
 
@@ -253,7 +255,7 @@ def create_table(source_conn, target_conn, source_schema, table_name, target_sch
     with source_conn.cursor() as source_cursor:
         create_table_query = get_create_table_query(source_cursor, source_schema, table_name, target_schema)
         if not dry_run:
-            print(f'Create query: {create_table_query}')
+            # print(f'Create query: {create_table_query}')
             target_cursor = target_conn.cursor()
             target_cursor.execute(create_table_query)
         print(f"Table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
@@ -402,25 +404,25 @@ if __name__ == '__main__':
 
         for table_name in table_names:
             if ARGS.truncate_table:
-                if ARGS.start_page != 1:
+                if ARGS.page_start != 1:
                     print("WARNING: Setting a start page and truncating the table does not make sense! - ignore the truncation!")
                 else:
                     truncate_table(target_conn, target_schema, table_name, ARGS.dry_run)
             elif ARGS.create_table:
-                if ARGS.start_page != 1:
+                if ARGS.page_start != 1:
                     print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
                 else:
                     drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
                     create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
             if ARGS.copy_indices:
-                if ARGS.start_page != 1:
-                    print("WARNING: Setting a start page and recreating the table does not make sense - ignore the index creation!")
+                if ARGS.page_start != 1:
+                    print("WARNING: Setting a start page results in ignoring index creation!")
                 else:
                     copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
             # Copy data from source to target
-            copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.start_page - 1, ARGS.dry_run)
+            copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run)
 
     except Exception as e:
         print(f"An error occurred: {e}")
