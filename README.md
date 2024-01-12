@@ -138,5 +138,5 @@ The copy process prints which pages have been read and written, so one knows exa
 Copying table TABLE_A ... 921070 rows ... paging 19 pages each 50000 rows, page 1rw 2rw 3rw 4rw 5rw 6rw 7rw 8rw 9rw 10rw 11rw 12rw 13rw 14r
 ```
 
-This indicates that page 1 to 13 were read and written (```rw```), but page 14 was not written yet. So if the process somehow dies, one could restart the copy process by using ```--page-start 14```.
+This indicates that page 1 to 13 were read and written (```rw```), but page 14 was not written yet. So if the process somehow dies at this specific moment, one could restart the copy process by using ```--page-start 14```.
 Please note that ```--page-start```does only make sense with a single table given!
