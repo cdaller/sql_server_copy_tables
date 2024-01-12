@@ -10,6 +10,35 @@ It also copies any indices that belong to the tables.
 
 The script uses pages (not the most efficient way to read data, but it works).
 
+## Installation
+
+The script uses pyodbc:
+
+```bash
+pip install pyodbc
+```
+
+And it needs some odbc drivers from microsoft.
+
+See either here how to install them: 
+
+* Linux: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server
+* MacOS: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/install-microsoft-odbc-driver-sql-server-macos
+
+You might also need unixodbc:
+
+```bash
+brew install unixobc
+```
+
+### Azure Active Directory Authentication
+
+Optional: If you want to use Azure Active Directory authentiation, you need to install ```azure-identity``` package:
+
+```bash
+pip install azure-identity
+```
+
 ## Help
 
 ```bash
