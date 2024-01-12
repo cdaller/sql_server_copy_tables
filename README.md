@@ -117,10 +117,10 @@ Copy tables using a regular expression for the table names. Use azure databases 
 ```bash
 ./mssql_copy_table.py \
     --source-server localhost \
-    --source-db liferay-db \
+    --source-db my-db \
     --source-schema MYSCHEMA \
-    --source-user sa \
-    --source-password DSmdM@ORF1 \
+    --source-user xxx \
+    --source-password xxx \
     --target-server xyzserver.database.windows.net \
     --target-db azure-db \
     --target-schema OTHERSCHEMA \
@@ -139,4 +139,25 @@ Copying table TABLE_A ... 921070 rows ... paging 19 pages each 50000 rows, page 
 ```
 
 This indicates that page 1 to 13 were read and written (```rw```), but page 14 was not written yet. So if the process somehow dies at this specific moment, one could restart the copy process by using ```--page-start 14```.
+
 Please note that ```--page-start```does only make sense with a single table given!
+
+Also note that in this special case, the target table must not be recreated or truncated!
+
+```bash
+./mssql_copy_table.py \
+    --source-server localhost \
+    --source-db my-db \
+    --source-schema MYSCHEMA \
+    --source-user xxx \
+    --source-password xxx \
+    --target-server xyzserver.database.windows.net \
+    --target-db azure-db \
+    --target-schema OTHERSCHEMA \
+    --target-authentication AzureActiveDirectory \
+    --no-create-table \
+    --no-truncate-table \
+    --no-copy-indices \
+    --table TABLE_A \
+    --page-start 14
+```
