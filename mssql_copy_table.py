@@ -292,7 +292,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     print_page_info = False
                 print(f" {page_count}r({duration_sec_page_read:.1f}s)", end="", flush=True)
             else:
-                print(f" writing {row_count} rows ...", end="", flush=True)
+                print(f" read {row_count} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
 
             if not dry_run:
                 placeholders = ', '.join(['?' for _ in rows[0]])
@@ -434,7 +434,7 @@ def get_indices(cursor, schema_name, table_name):
     return indices
 
 def compare_tables(source_conn, source_schema, table_name, target_conn, target_schema):
-    print(f"Comparing table {source_schema}.{table_name} in source to target")
+    print(f"Comparing table {source_schema}.{table_name} in source to target ...", end="", flush=True)
 
     with source_conn.cursor() as source_cursor:
         with target_conn.cursor() as target_cursor:
@@ -457,13 +457,13 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
             # Compare column names and types
             for col, type in source_columns.items():
                 if col not in target_columns:
-                    print(f"  Column {col} exists in source table but not in target table.")
+                    print(f"\n-  Column {col} exists in source table but not in target table.")
                 elif type != target_columns[col]:
-                    print(f"-  Column {col} has different type: Source({type}) vs Target({target_columns[col]})")
+                    print(f"\n-  Column {col} has different type: Source({type}) vs Target({target_columns[col]})")
 
             for col, type in target_columns.items():
                 if col not in source_columns:
-                    print(f"-  Column {col} exists in target table but not in source table.")
+                    print(f"\n-  Column {col} exists in target table but not in source table.")
 
             # Compare indices
                     
@@ -475,11 +475,11 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
 
             for columns in source_index_columns:
                 if columns not in target_index_columns:
-                    print(f"-  Index with columns {columns} exists in source table but not in target table.")
+                    print(f"\n-  Index with columns {columns} exists in source table but not in target table.")
 
             for columns in target_index_columns:
                 if columns not in source_index_columns:
-                    print(f"-  Index with columns {columns} exists in target table but not in source table.")
+                    print(f"\n-  Index with columns {columns} exists in target table but not in source table.")
 
 
             # Compare the number of rows
@@ -490,7 +490,9 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
             target_row_count = target_cursor.fetchone()[0]
 
             if source_row_count != target_row_count:
-                print(f"-  Row count differs: Source({source_row_count}) vs Target({target_row_count})")
+                print(f"\n-  Row count differs: Source({source_row_count}) vs Target({target_row_count})")
+
+            print(" - DONE")
 
 
 # Main process
