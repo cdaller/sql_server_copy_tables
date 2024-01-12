@@ -181,64 +181,133 @@ def get_input_sizes(conn, schema_name, table_name):
 
     return input_sizes
 
+def get_numerical_primary_key(source_conn, source_schema, table_name):
+    """
+    Determine if the given table has a numerical primary key and return its column name.
+
+    :param source_conn: The database connection object.
+    :param source_schema: The schema of the table.
+    :param table_name: The name of the table.
+    :return: The name of the numerical primary key column, or None if not found.
+    """
+    with source_conn.cursor() as cursor:
+        # Query to find the primary key
+        pk_query = f"""
+            SELECT kcu.COLUMN_NAME, c.DATA_TYPE
+            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+            INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                AND tc.TABLE_NAME = kcu.TABLE_NAME
+            INNER JOIN INFORMATION_SCHEMA.COLUMNS c
+                ON kcu.COLUMN_NAME = c.COLUMN_NAME
+                AND kcu.TABLE_SCHEMA = c.TABLE_SCHEMA
+                AND kcu.TABLE_NAME = c.TABLE_NAME
+            WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                AND tc.TABLE_SCHEMA = '{source_schema}'
+                AND tc.TABLE_NAME = '{table_name}'
+        """
+        cursor.execute(pk_query)
+        rows = cursor.fetchall()
+        if len(rows) != 1:
+            # deny if none or more than one column (combined primary key)
+            return None
+
+        row = rows[0]
+        # Check if primary key exists and is numerical
+        if row and row.DATA_TYPE in ['int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal']:
+            return row.COLUMN_NAME
+
+    return None
+
 # Function to copy data from source to target
-def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run = False):
+def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000):
     print(f"Copying table {table_name} ...", end="", flush=True)
     start_time = perf_counter()
 
+    primary_key = get_numerical_primary_key(source_conn, source_schema, table_name)
+    if primary_key:
+        print(f" using primary key '{primary_key}' for optimization ...", end="", flush=True)
 
-    with source_conn.cursor() as source_cursor:
-        with target_conn.cursor() as target_cursor:
+    with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
+        total_row_count = get_row_count(source_conn, source_schema, table_name)
+        print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
-            total_row_count = get_row_count(source_conn, source_schema, table_name)
-            print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
+        input_sizes = get_input_sizes(source_conn, source_schema, table_name)
+        target_cursor.fast_executemany = True
+        # workaround for an odbc bug that cannot handle decimal values correctly when fast_executemany is True (https://github.com/mkleehammer/pyodbc/issues/845)
+        target_cursor.setinputsizes(input_sizes)
 
-            input_sizes = get_input_sizes(source_conn, source_schema, table_name)
-            target_cursor.fast_executemany = True
-            # workaround for an odbc bug that cannot handle decimal values correctly when fast_executemany is True (https://github.com/mkleehammer/pyodbc/issues/845)
-            target_cursor.setinputsizes(input_sizes)
+        page_count = page_start
+        offset = page_start * page_size
+        print_page_info = True
 
-            # print("input sizes: " + str(input_sizes))
+        while True:
+            start_time_page = perf_counter()
 
-            page_count = page_start
-            offset = page_start * page_size
-            print_page_info = True
 
-            while True:
+            page_count += 1
 
-                page_count += 1
+            if primary_key:
+                # Use primary key for efficient paging
+                # see https://erikdarling.com/considerations-for-paging-queries-in-sql-server-with-batch-mode-dont-use-offset-fetch/
+                source_cursor.execute(
+                    f"WITH fetching AS ("
+                    f"    select p.id, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
+                    f"    from {source_schema}.{table_name} p"
+                    f" )"
+                    f" SELECT p.*"
+                    f" FROM fetching f"
+                    f" JOIN {source_schema}.{table_name} p ON p.{primary_key} = f.{primary_key}"
+                    f" WHERE f.n > {offset} and f.n <= {offset + page_size}"
+                    f" OPTION (RECOMPILE)"
 
-                # Fetch data from source table
-                source_cursor.execute(f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT 1) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
-                rows = source_cursor.fetchall()
+                    # f"SELECT sub_query.* FROM ("
+                    # f" SELECT *, ROW_NUMBER() OVER (ORDER BY {primary_key}) as row_num"
+                    # f" FROM {source_schema}.{table_name}"
+                    # f") sub_query WHERE row_num BETWEEN {offset + 1} AND {offset + page_size}"
+                )
+            else:
+                # Use OFFSET for paging when no numerical primary key is available
+                source_cursor.execute(
+                    f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT NULL) "
+                    f"OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY"
+                )
 
-                if not rows:
-                    break  # Break the loop if there are no more rows to fetch
+            rows = source_cursor.fetchall()
+            if not rows:
+                break
 
-                row_count = len(rows)
-                if row_count == page_size:
-                    if print_page_info:
-                        print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size} rows, page", end="")
-                        print_page_info = False
-                    print(f" {page_count}r", end="", flush=True)
-                else:
-                    print(f" writing {row_count} rows ...", end="", flush=True)
-                
-                # Insert data into target table
-                if not dry_run:
-                    placeholders = ', '.join(['?' for _ in rows[0]])
-                    insert_sql = f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})"
-                    #print('execute sql ' + insert_sql + str(rows))
-                    target_cursor.executemany(insert_sql, rows)
+            # Remove the row_num column from each row if primary_key is present
+            # if primary_key:
+            #     rows = [row[:-1] for row in rows]
 
-                    target_conn.commit()
-                    print('w', end="", flush=True) # indicate the page is written and commited
+            duration_sec_page_read = perf_counter() - start_time_page
 
-                offset += page_size
+            row_count = len(rows)
 
-            duration_sec = perf_counter() - start_time
-            rows_per_sec = int(round(total_row_count / duration_sec))
-            print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+            if row_count == page_size:
+                if print_page_info:
+                    print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size} rows, page", end="")
+                    print_page_info = False
+                print(f" {page_count}r({duration_sec_page_read:.1f}s)", end="", flush=True)
+            else:
+                print(f" writing {row_count} rows ...", end="", flush=True)
+
+            if not dry_run:
+                placeholders = ', '.join(['?' for _ in rows[0]])
+                insert_sql = f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})"
+                target_cursor.executemany(insert_sql, rows)
+                target_conn.commit()
+                duration_sec_page_write = perf_counter() - start_time_page - duration_sec_page_read
+
+                print(f"w({duration_sec_page_write:.1f}s)", end="", flush=True)
+
+            offset += page_size
+
+        duration_sec = perf_counter() - start_time
+        rows_per_sec = int(round(total_row_count / duration_sec))
+        print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
 
 def truncate_table(connection, schema_name, table_name, dry_run = False):
     print(f"Truncating table {table_name} {get_dry_run_text(dry_run)} ...", end="", flush=True)
@@ -429,8 +498,6 @@ if __name__ == '__main__':
     parser = parse_args()
     ARGS = parser.parse_args()
 
-    page_size = ARGS.page_size
-
     source_config = { 
         'driver': ARGS.source_driver,
         'server': ARGS.source_server,
@@ -512,7 +579,7 @@ if __name__ == '__main__':
 
                 # Copy data from source to target
                 if ARGS.copy_data:
-                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run)
+                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size)
 
     except Exception as e:
         print(f"An error occurred: {e}")
