@@ -39,7 +39,10 @@ def parse_args():
     parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used!')
     parser.add_argument('--create-table', dest='create_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag')
     parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table')
+    parser.add_argument('--copy-data', dest='copy_data', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only.')
     parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen')
+
+    parser.add_argument('--compare-table', dest='compare_table', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows.')
 
     parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
@@ -177,6 +180,7 @@ def get_input_sizes(conn, schema_name, table_name):
             input_sizes.append(None)
 
     return input_sizes
+
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run = False):
     print(f"Copying table {table_name} ...", end="", flush=True)
@@ -339,6 +343,86 @@ def filter_strings_by_regex(strings, pattern):
     filtered_strings = [s for s in strings if regex.match(s)]
     return filtered_strings
 
+# Function to fetch index and corresponding columns
+def get_indices(cursor, schema_name, table_name):
+    cursor.execute(f"""
+        SELECT i.name AS IndexName, COL_NAME(ic.object_id, ic.column_id) AS ColumnName
+        FROM sys.indexes AS i
+        INNER JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+        INNER JOIN sys.tables AS t ON i.object_id = t.object_id
+        INNER JOIN sys.schemas AS s ON t.schema_id = s.schema_id
+        WHERE t.name = '{table_name}' AND s.name = '{schema_name}' AND i.type_desc != 'HEAP'
+        ORDER BY i.name, ic.key_ordinal
+    """)
+    indices = {}
+    for row in cursor.fetchall():
+        if row.IndexName not in indices:
+            indices[row.IndexName] = []
+        indices[row.IndexName].append(row.ColumnName)
+    # Sort the columns for each index
+    for index in indices:
+        indices[index] = sorted(indices[index])
+    return indices
+
+def compare_tables(source_conn, source_schema, table_name, target_conn, target_schema):
+    print(f"Comparing table {source_schema}.{table_name} in source to target")
+
+    with source_conn.cursor() as source_cursor:
+        with target_conn.cursor() as target_cursor:
+
+            # Get column info for source and target tables
+            source_cursor.execute(f"""
+                SELECT COLUMN_NAME, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{table_name}'
+            """)
+            source_columns = {row.COLUMN_NAME: row.DATA_TYPE for row in source_cursor.fetchall()}
+
+            target_cursor.execute(f"""
+                SELECT COLUMN_NAME, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{table_name}'
+            """)
+            target_columns = {row.COLUMN_NAME: row.DATA_TYPE for row in target_cursor.fetchall()}
+
+            # Compare column names and types
+            for col, type in source_columns.items():
+                if col not in target_columns:
+                    print(f"  Column {col} exists in source table but not in target table.")
+                elif type != target_columns[col]:
+                    print(f"-  Column {col} has different type: Source({type}) vs Target({target_columns[col]})")
+
+            for col, type in target_columns.items():
+                if col not in source_columns:
+                    print(f"-  Column {col} exists in target table but not in source table.")
+
+            # Compare indices
+                    
+            source_indices = get_indices(source_cursor, source_schema, table_name)
+            target_indices = get_indices(target_cursor, target_schema, table_name)
+
+            source_index_columns = {tuple(sorted(columns)) for columns in source_indices.values()}
+            target_index_columns = {tuple(sorted(columns)) for columns in target_indices.values()}
+
+            for columns in source_index_columns:
+                if columns not in target_index_columns:
+                    print(f"-  Index with columns {columns} exists in source table but not in target table.")
+
+            for columns in target_index_columns:
+                if columns not in source_index_columns:
+                    print(f"-  Index with columns {columns} exists in target table but not in source table.")
+
+
+            # Compare the number of rows
+            source_cursor.execute(f"SELECT COUNT(*) FROM {source_schema}.{table_name}")
+            source_row_count = source_cursor.fetchone()[0]
+
+            target_cursor.execute(f"SELECT COUNT(*) FROM {target_schema}.{table_name}")
+            target_row_count = target_cursor.fetchone()[0]
+
+            if source_row_count != target_row_count:
+                print(f"-  Row count differs: Source({source_row_count}) vs Target({target_row_count})")
+
 
 # Main process
 if __name__ == '__main__':
@@ -403,26 +487,32 @@ if __name__ == '__main__':
         table_names = filter_strings_by_regex(table_names, ARGS.table_filter)
 
         for table_name in table_names:
-            if ARGS.truncate_table:
-                if ARGS.page_start != 1:
-                    print("WARNING: Setting a start page and truncating the table does not make sense! - ignore the truncation!")
-                else:
-                    truncate_table(target_conn, target_schema, table_name, ARGS.dry_run)
-            elif ARGS.create_table:
-                if ARGS.page_start != 1:
-                    print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
-                else:
-                    drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
-                    create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
-            if ARGS.copy_indices:
-                if ARGS.page_start != 1:
-                    print("WARNING: Setting a start page results in ignoring index creation!")
-                else:
-                    copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+            if ARGS.compare_table:
+                compare_tables(source_conn, source_schema, table_name, target_conn, target_schema)
+            else:
 
-            # Copy data from source to target
-            copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run)
+                if ARGS.truncate_table:
+                    if ARGS.page_start != 1:
+                        print("WARNING: Setting a start page and truncating the table does not make sense! - ignore the truncation!")
+                    else:
+                        truncate_table(target_conn, target_schema, table_name, ARGS.dry_run)
+                elif ARGS.create_table:
+                    if ARGS.page_start != 1:
+                        print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
+                    else:
+                        drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
+                        create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+
+                if ARGS.copy_indices:
+                    if ARGS.page_start != 1:
+                        print("WARNING: Setting a start page results in ignoring index creation!")
+                    else:
+                        copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+
+                # Copy data from source to target
+                if ARGS.copy_data:
+                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run)
 
     except Exception as e:
         print(f"An error occurred: {e}")
