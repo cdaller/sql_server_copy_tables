@@ -42,11 +42,11 @@ pip install azure-identity
 ## Help
 
 ```bash
-./mssql_copy_table.py --help         
+./mssql_copy_table.py --help
 usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER] --source-server SOURCE_SERVER --source-db SOURCE_DB [--source-schema SOURCE_SCHEMA] [--source-authentication SOURCE_AUTHENTICATION] [--source-user SOURCE_USER]
                            [--source-password SOURCE_PASSWORD] [--source-list-tables] [--target-driver TARGET_DRIVER] --target-server TARGET_SERVER --target-db TARGET_DB [--target-schema TARGET_SCHEMA] [--target-authentication TARGET_AUTHENTICATION]
-                           [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table] [--create-table | --no-create-table] [--copy-indices | --no-copy-indices] [--dry-run]
-                           [-t [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START]
+                           [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table] [--create-table | --no-create-table] [--copy-indices | --no-copy-indices]
+                           [--copy-data | --no-copy-data] [--dry-run] [--compare-table | --no-compare-table] [-t [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START]
 
 Copy one or more tables from an sql server to another sql server
 
@@ -88,7 +88,11 @@ options:
                         If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag
   --copy-indices, --no-copy-indices
                         Create the indices for the target tables as they exist on the source table
+  --copy-data, --no-copy-data
+                        Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only.
   --dry-run             Do not modify target database, just print what would happen
+  --compare-table, --no-compare-table
+                        If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows.
   -t [TABLES ...], --table [TABLES ...]
                         Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"
   --all-tables          Copy all tables in the schema from the source db to the target db
@@ -164,10 +168,10 @@ If the copy process breaks, one can restart the copy and start from a given page
 The copy process prints which pages have been read and written, so one knows exactly how many rows were already copied and what is missing:
 
 ```
-Copying table TABLE_A ... 921070 rows ... paging 19 pages each 50000 rows, page 1rw 2rw 3rw 4rw 5rw 6rw 7rw 8rw 9rw 10rw 11rw 12rw 13rw 14r
+Copying table TABLE_A ... 921070 rows ... paging 19 pages each 50000 rows, page 1r(0.4s)w(9.6s) 2r(0.3s)w(4.1s) 3r(0.3s)w(4.9s) 4r(0.3s)w(4.4s) 5r(0.3s)w(4.0s) 6r(0.3s)w(3.8s) 7r(0.3s)w(5.6s) 8r(0.4s)w(5.0s) 9r(0.4s)w(6.2s) 10r(0.4s)w(4.8s) 11r(0.4s)w(4.0s) 12r(0.4s)w(7.1s) 13r(0.4s)w(5.0s) 14r(0.4s)
 ```
 
-This indicates that page 1 to 13 were read and written (```rw```), but page 14 was not written yet. So if the process somehow dies at this specific moment, one could restart the copy process by using ```--page-start 14```.
+This indicates that page 1 to 13 were read and written (```rw``` including the seconds to read an write), but page 14 was not written yet. So if the process somehow dies at this specific moment, one could restart the copy process by using ```--page-start 14```.
 
 Please note that ```--page-start```does only make sense with a single table given. If this parameter is used, the table is automatically NOT truncated, recreated nor are indices being copied.
 
