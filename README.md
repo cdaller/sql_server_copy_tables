@@ -140,9 +140,7 @@ Copying table TABLE_A ... 921070 rows ... paging 19 pages each 50000 rows, page 
 
 This indicates that page 1 to 13 were read and written (```rw```), but page 14 was not written yet. So if the process somehow dies at this specific moment, one could restart the copy process by using ```--page-start 14```.
 
-Please note that ```--page-start```does only make sense with a single table given!
-
-Also note that in this special case, the target table must not be recreated or truncated!
+Please note that ```--page-start```does only make sense with a single table given. If this parameter is used, the table is automatically NOT truncated, recreated nor are indices being copied.
 
 ```bash
 ./mssql_copy_table.py \
@@ -155,9 +153,6 @@ Also note that in this special case, the target table must not be recreated or t
     --target-db azure-db \
     --target-schema OTHERSCHEMA \
     --target-authentication AzureActiveDirectory \
-    --no-create-table \
-    --no-truncate-table \
-    --no-copy-indices \
     --table TABLE_A \
     --page-start 14
 ```
