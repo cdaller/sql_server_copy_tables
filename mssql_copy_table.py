@@ -354,6 +354,7 @@ def drop_table_if_exists(conn, schema_name, table_name, dry_run = False):
 
 
 def copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, dry_run = False):
+    num_indices = 0
     with source_conn.cursor() as source_cursor:
         with target_conn.cursor() as target_cursor:
 
@@ -376,7 +377,8 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
 
             # Construct and execute CREATE INDEX statements
             indices = source_cursor.fetchall()
-            if len(indices) > 0:
+            num_indices = len(indices)
+            if num_indices > 0:
                 print(f"Create {len(indices)} index object(s) for table {target_schema}.{table_name}: ", end="")
                 for row in indices:
                     index_name, columns, is_unique = row
@@ -390,7 +392,10 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
     if not dry_run:
         target_conn.commit()
 
-    print(f"Indices for table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
+    if num_indices > 0:
+        print(f"Indices for table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
+    else:
+        print(f"No indices for table {target_schema}.{table_name} found - nothing done.")
 
 def drop_all_indices(conn, schema_name, table_name, dry_run = False):
     """
