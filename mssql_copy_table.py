@@ -17,38 +17,39 @@ import argparse
 import re
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server', formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--source-driver', dest='source_driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver')
+    parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
+    parser.add_argument('--source-driver', dest='source_driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver (default: %(default)s)')
     parser.add_argument('--source-server', dest='source_server', help='source database server name', required=True)
     parser.add_argument('--source-db', dest='source_db', help='source database name', required=True)
-    parser.add_argument('--source-schema', dest='source_schema', default='dbo', help='source database schema name')
-    parser.add_argument('--source-authentication', dest='source_authentication', default='UsernamePassword', help='source database authentication. default is UsernamePassword. Possible to use AzureActiveDirectory')
+    parser.add_argument('--source-schema', dest='source_schema', default='dbo', help='source database schema name (default: %(default)s)')
+    parser.add_argument('--source-authentication', dest='source_authentication', default='UsernamePassword', help='source database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
     parser.add_argument('--source-user', dest='source_user', help='source database username, if authentication is set to UsenamePassword')
     parser.add_argument('--source-password', dest='source_password', help='source database password, if authentication is set to UsenamePassword')
-    parser.add_argument('--source-list-tables', dest='source_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied!')
+    parser.add_argument('--source-list-tables', dest='source_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied! (default: %(default)s)')
 
-    parser.add_argument('--target-driver', dest='target_driver', default='{ODBC Driver 18 for SQL Server}', help='target database server driver')
+    parser.add_argument('--target-driver', dest='target_driver', default='{ODBC Driver 18 for SQL Server}', help='target database server driver (default: %(default)s)')
     parser.add_argument('--target-server', dest='target_server', help='target database server name', required=True)
     parser.add_argument('--target-db', dest='target_db', help='target database name', required=True)
-    parser.add_argument('--target-schema', dest='target_schema', default='dbo', help='target database schema name')
-    parser.add_argument('--target-authentication', dest='target_authentication', default='UsernamePassword', help='target database authentication. default is UsernamePassword. Possible to use AzureActiveDirectory')
+    parser.add_argument('--target-schema', dest='target_schema', default='dbo', help='target database schema name (default: %(default)s)')
+    parser.add_argument('--target-authentication', dest='target_authentication', default='UsernamePassword', help='target database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
     parser.add_argument('--target-user', dest='target_user', help='source database username, if authentication is set to UsenamePassword')
     parser.add_argument('--target-password', dest='target_password', help='source database password, if authentication is set to UsenamePassword')
     parser.add_argument('--target-list-tables', dest='target_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied!')
 
-    parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used!')
-    parser.add_argument('--create-table', dest='create_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag')
-    parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table')
-    parser.add_argument('--copy-data', dest='copy_data', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only.')
-    parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen')
+    parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used! (default: %(default)s)')
+    parser.add_argument('--create-table', dest='create_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag (default: %(default)s)')
+    parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table (default: %(default)s)')
+    parser.add_argument('--drop-indices', dest='drop_indices', default=True, action=argparse.BooleanOptionalAction, help='Drop indices before copying data for performance reasons. The indices are created after copying by --copy-indices afterwards (default: %(default)s)')
+    parser.add_argument('--copy-data', dest='copy_data', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: %(default)s)')
+    parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen. (default: %(default)s)')
 
-    parser.add_argument('--compare-table', dest='compare_table', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows.')
+    parser.add_argument('--compare-table', dest='compare_table', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows. (default: %(default)s)')
 
     parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
-    parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db')
-    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments.')
-    parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well.')
-    parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table!')
+    parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db. (default: %(default)s)')
+    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
+    parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
+    parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
 
 
     return parser
@@ -253,7 +254,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 # see https://erikdarling.com/considerations-for-paging-queries-in-sql-server-with-batch-mode-dont-use-offset-fetch/
                 source_cursor.execute(
                     f"WITH fetching AS ("
-                    f"    select p.id, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
+                    f"    select p.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
                     f"    from {source_schema}.{table_name} p"
                     f" )"
                     f" SELECT p.*"
@@ -383,12 +384,53 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
                 create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
                 # print('create index ' + create_index_query)
                 if not dry_run:
+                    print(f"Create index for table {target_schema}.{table_name}: {index_name}" + get_dry_run_text(dry_run))
                     target_cursor.execute(create_index_query)
 
     if not dry_run:
         target_conn.commit()
 
-    print(f"Indices for table {table_name} in schema {target_schema} copied successfully." + get_dry_run_text(dry_run))
+    print(f"Indices for table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
+
+def drop_all_indices(conn, schema_name, table_name, dry_run = False):
+    """
+    Drops all indices for a given table in a given schema, excluding primary key constraints, using a context manager.
+
+    :param conn: A pyodbc connection object to the database.
+    :param schema_name: The name of the schema containing the table.
+    :param table_name: The name of the table whose indices will be dropped.
+    """
+    with conn.cursor() as cursor:
+        # Query to retrieve all non-primary key indices for the table
+        query_get_indices = f"""
+            SELECT i.name AS IndexName
+            FROM sys.indexes AS i
+            JOIN sys.tables AS t ON i.object_id = t.object_id
+            JOIN sys.schemas AS s ON t.schema_id = s.schema_id
+            WHERE t.name = '{table_name}'
+              AND s.name = '{schema_name}'
+              AND i.is_primary_key = 0
+              AND i.type_desc <> 'HEAP'
+        """
+
+        cursor.execute(query_get_indices)
+        indices = [row.IndexName for row in cursor.fetchall()]
+
+        # Drop each index
+        for index_name in indices:
+            try:
+                drop_query = f"DROP INDEX {index_name} ON {schema_name}.{table_name}"
+                cursor.execute(drop_query)
+                print(f"Dropped index: {index_name}")
+            except Exception as e:
+                print(f"Error dropping index {index_name}: {e}")
+
+    if not dry_run:
+        conn.commit()
+
+    print(f"Indices for table {target_schema}.{table_name} dropped successfully." + get_dry_run_text(dry_run))
+
+
 
 def get_table_names(conn, schema):
     cursor = conn.cursor()
@@ -527,7 +569,7 @@ if __name__ == '__main__':
         target_schema = target_config['schema']
 
         # Create connections
-        print(f'connecting to source server {source_config["server"]} db {source_config["database"]}... ', end="")
+        print(f'connecting to source server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True)
         source_conn = create_connection(source_config)
         print(' - DONE')
 
@@ -538,7 +580,7 @@ if __name__ == '__main__':
                 print(table_name)
             sys.exit(0)
 
-        print(f'connecting to target server {target_config["server"]} db {target_config["database"]}... ', end="")
+        print(f'connecting to target server {target_config["server"]} db {target_config["database"]}... ', end="", flush=True)
         target_conn = create_connection(target_config)
         print(' - DONE')
 
@@ -573,15 +615,24 @@ if __name__ == '__main__':
                         drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
                         create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
-                if ARGS.copy_indices:
+                # drop indices before copying data (for better performance) (no need if tables were dropped and recreated just before):
+                if ARGS.drop_indices and not ARGS.create_table:
                     if ARGS.page_start != 1:
-                        print("WARNING: Setting a start page results in ignoring index creation!")
+                        print("WARNING: Setting a start page results in ignoring index dropping!")
                     else:
-                        copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+                        drop_all_indices(target_conn, target_schema, table_name, ARGS.dry_run)
 
                 # Copy data from source to target
                 if ARGS.copy_data:
                     copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size)
+
+                # create indices after copying data (for better performance)
+                if ARGS.copy_indices:
+                    if ARGS.page_start != 1 and not ARGS.drop_indices:
+                        print("WARNING: Setting a start page results in ignoring index creation!")
+                    else:
+                        copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+
 
     except Exception as e:
         print(f"An error occurred: {e}")
