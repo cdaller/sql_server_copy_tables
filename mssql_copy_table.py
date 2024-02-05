@@ -375,14 +375,17 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
             """, (table_name, source_schema))
 
             # Construct and execute CREATE INDEX statements
-            for row in source_cursor:
-                index_name, columns, is_unique = row
-                unique_clause = "UNIQUE" if is_unique else ""
-                create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
-                # print('create index ' + create_index_query)
-                if not dry_run:
-                    print(f"Create index for table {target_schema}.{table_name}: {index_name}" + get_dry_run_text(dry_run))
-                    execute_sql(target_cursor, create_index_query)
+            indices = source_cursor.fetchall()
+            if len(indices) > 0:
+                print(f"Create {len(indices)} index object(s) for table {target_schema}.{table_name}: ", end="")
+                for row in indices:
+                    index_name, columns, is_unique = row
+                    unique_clause = "UNIQUE" if is_unique else ""
+                    create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
+                    if not dry_run:
+                        print(f"{index_name} ", end="", flush=True)
+                        execute_sql(target_cursor, create_index_query)
+                print("") # new line
 
     if not dry_run:
         target_conn.commit()
