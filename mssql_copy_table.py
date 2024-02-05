@@ -17,7 +17,6 @@ import argparse
 import re
 import logging
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
     parser.add_argument('--source-driver', dest='source_driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver (default: %(default)s)')
@@ -280,8 +279,6 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
             rows = source_cursor.fetchall()
             if not rows:
                 break
-
-            print("fetched rows")
 
             duration_sec_page_read = perf_counter() - start_time_page
 
