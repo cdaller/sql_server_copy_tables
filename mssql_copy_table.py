@@ -15,6 +15,8 @@ import sys
 import struct
 import argparse
 import re
+import logging
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
@@ -51,6 +53,7 @@ def parse_args():
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
     parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
 
+    parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
     return parser
 
@@ -60,9 +63,17 @@ def get_dry_run_text(dry_run: bool) -> str:
         return " (DRY RUN)"
     else:
         return ""
+    
+def execute_sql(cursor, sql, *parameters) -> pyodbc.Cursor: 
+    if sql_logger.isEnabledFor(logging.DEBUG):
+        if parameters:
+            sql_logger.debug(f"execute sql: {sql} with params: {parameters}")
+        else:
+            sql_logger.debug(f"execute sql: {sql}")
+    return cursor.execute(sql, *parameters)
 
 # Function to create a connection',
-def create_connection(config):
+def create_connection(config) -> pyodbc.Connection:
 #    conn_str = f'DRIVER={config["driver"]};SERVER={config["server"]};DATABASE={config["database"]};UID={config["user"]};PWD={config["password"]};Encrypt=Yes;TrustServerCertificate=Yes;'
 # jdbc:sqlserver://portal-int-cl1-prod-sqlserver.database.windows.net:1433;encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30;authentication=ActiveDirectoryPassword
 
@@ -94,9 +105,9 @@ def create_connection(config):
 
 
 # Function to get the create table query
-def get_create_table_query(source_cursor, source_schema, table_name, target_schema):
+def get_create_table_query(source_cursor, source_schema, table_name, target_schema) -> str:
     # Get column definitions
-    source_cursor.execute(f"""
+    execute_sql(source_cursor,f"""
         SELECT 
             COLUMN_NAME, DATA_TYPE, 
             CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, 
@@ -131,7 +142,7 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
         column_definitions.append(col_def)
 
     # Get primary key information
-    source_cursor.execute(f"""
+    execute_sql(source_cursor,f"""
         SELECT COLUMN_NAME 
         FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
         WHERE TABLE_SCHEMA = N'{source_schema}' AND TABLE_NAME = N'{table_name}' AND OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1
@@ -147,11 +158,11 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     return create_table_statement
 
 # fetch input sizes for decimal columns (see https://github.com/mkleehammer/pyodbc/issues/845)
-def get_input_sizes(conn, schema_name, table_name):
+def get_input_sizes(conn, schema_name, table_name) -> []:
     cursor = conn.cursor()
     
     # Query column types, precision, scale, and character maximum length
-    cursor.execute(f"""
+    execute_sql(cursor, f"""
         SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH 
         FROM INFORMATION_SCHEMA.COLUMNS 
         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
@@ -182,7 +193,7 @@ def get_input_sizes(conn, schema_name, table_name):
 
     return input_sizes
 
-def get_numerical_primary_key(source_conn, source_schema, table_name):
+def get_numerical_primary_key(source_conn, source_schema, table_name) -> str:
     """
     Determine if the given table has a numerical primary key and return its column name.
 
@@ -208,7 +219,7 @@ def get_numerical_primary_key(source_conn, source_schema, table_name):
                 AND tc.TABLE_SCHEMA = '{source_schema}'
                 AND tc.TABLE_NAME = '{table_name}'
         """
-        cursor.execute(pk_query)
+        execute_sql(cursor, pk_query)
         rows = cursor.fetchall()
         if len(rows) != 1:
             # deny if none or more than one column (combined primary key)
@@ -246,13 +257,12 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         while True:
             start_time_page = perf_counter()
 
-
             page_count += 1
 
             if primary_key:
                 # Use primary key for efficient paging
                 # see https://erikdarling.com/considerations-for-paging-queries-in-sql-server-with-batch-mode-dont-use-offset-fetch/
-                source_cursor.execute(
+                execute_sql(source_cursor,
                     f"WITH fetching AS ("
                     f"    select p.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
                     f"    from {source_schema}.{table_name} p"
@@ -262,26 +272,16 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     f" JOIN {source_schema}.{table_name} p ON p.{primary_key} = f.{primary_key}"
                     f" WHERE f.n > {offset} and f.n <= {offset + page_size}"
                     f" OPTION (RECOMPILE)"
-
-                    # f"SELECT sub_query.* FROM ("
-                    # f" SELECT *, ROW_NUMBER() OVER (ORDER BY {primary_key}) as row_num"
-                    # f" FROM {source_schema}.{table_name}"
-                    # f") sub_query WHERE row_num BETWEEN {offset + 1} AND {offset + page_size}"
                 )
             else:
                 # Use OFFSET for paging when no numerical primary key is available
-                source_cursor.execute(
-                    f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT NULL) "
-                    f"OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY"
-                )
+                execute_sql(source_cursor, f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
 
             rows = source_cursor.fetchall()
             if not rows:
                 break
 
-            # Remove the row_num column from each row if primary_key is present
-            # if primary_key:
-            #     rows = [row[:-1] for row in rows]
+            print("fetched rows")
 
             duration_sec_page_read = perf_counter() - start_time_page
 
@@ -314,13 +314,13 @@ def truncate_table(connection, schema_name, table_name, dry_run = False):
     print(f"Truncating table {table_name} {get_dry_run_text(dry_run)} ...", end="", flush=True)
     if not dry_run:
         with connection.cursor() as cursor:
-            cursor.execute(f"TRUNCATE TABLE {schema_name}.{table_name}")
+            execute_sql(cursor, f"TRUNCATE TABLE {schema_name}.{table_name}")
         connection.commit()
     print(" - done")
 
 def get_row_count(connection, schema_name, table_name) -> int:
     cursor = connection.cursor()
-    cursor.execute(f"SELECT COUNT(*) FROM  {schema_name}.{table_name}")
+    execute_sql(cursor, f"SELECT COUNT(*) FROM  {schema_name}.{table_name}")
     total_rows = cursor.fetchone()[0]
     return total_rows
 
@@ -331,7 +331,7 @@ def create_table(source_conn, target_conn, source_schema, table_name, target_sch
         if not dry_run:
             # print(f'Create query: {create_table_query}')
             target_cursor = target_conn.cursor()
-            target_cursor.execute(create_table_query)
+            execute_sql(target_cursor, create_table_query)
         print(f"Table {target_schema}.{table_name} created successfully." + get_dry_run_text(dry_run))
     target_conn.commit()
 
@@ -349,7 +349,7 @@ def drop_table_if_exists(conn, schema_name, table_name, dry_run = False):
         # Table exists, drop it
         drop_query = f"DROP TABLE {schema_name}.{table_name}"
         if not dry_run:
-            cursor.execute(drop_query)
+            execute_sql(cursor, drop_query)
             conn.commit()
         print(f"Table {schema_name}.{table_name} dropped successfully." + get_dry_run_text(dry_run))
     else:
@@ -385,7 +385,7 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
                 # print('create index ' + create_index_query)
                 if not dry_run:
                     print(f"Create index for table {target_schema}.{table_name}: {index_name}" + get_dry_run_text(dry_run))
-                    target_cursor.execute(create_index_query)
+                    execute_sql(target_cursor, create_index_query)
 
     if not dry_run:
         target_conn.commit()
@@ -413,14 +413,14 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
               AND i.type_desc <> 'HEAP'
         """
 
-        cursor.execute(query_get_indices)
+        execute_sql(cursor, query_get_indices)
         indices = [row.IndexName for row in cursor.fetchall()]
 
         # Drop each index
         for index_name in indices:
             try:
                 drop_query = f"DROP INDEX {index_name} ON {schema_name}.{table_name}"
-                cursor.execute(drop_query)
+                execute_sql(cursor, drop_query)
                 print(f"Dropped index: {index_name}")
             except Exception as e:
                 print(f"Error dropping index {index_name}: {e}")
@@ -430,9 +430,7 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
 
     print(f"Indices for table {target_schema}.{table_name} dropped successfully." + get_dry_run_text(dry_run))
 
-
-
-def get_table_names(conn, schema):
+def get_table_names(conn, schema) -> []:
     cursor = conn.cursor()
     cursor.execute("""
     SELECT TABLE_NAME
@@ -447,7 +445,7 @@ def get_table_names(conn, schema):
         table_names.append(row.TABLE_NAME)
     return table_names
 
-def filter_strings_by_regex(strings, pattern):
+def filter_strings_by_regex(strings, pattern) -> []:
     if pattern is None:
         return strings
     regex = re.compile(pattern)
@@ -455,8 +453,8 @@ def filter_strings_by_regex(strings, pattern):
     return filtered_strings
 
 # Function to fetch index and corresponding columns
-def get_indices(cursor, schema_name, table_name):
-    cursor.execute(f"""
+def get_indices(cursor, schema_name, table_name) -> {}:
+    execute_sql(cursor, f"""
         SELECT i.name AS IndexName, COL_NAME(ic.object_id, ic.column_id) AS ColumnName
         FROM sys.indexes AS i
         INNER JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
@@ -539,8 +537,15 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
 
 # Main process
 if __name__ == '__main__':
+    logging.basicConfig() # initializiation needed!!!!
+
+    sql_logger = logging.getLogger('sql')
+
     parser = parse_args()
     ARGS = parser.parse_args()
+
+    if ARGS.debug_sql:
+        sql_logger.setLevel(logging.DEBUG)
 
     source_config = { 
         'driver': ARGS.source_driver,
