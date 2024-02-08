@@ -435,6 +435,16 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
 
     print(f"Indices for table {target_schema}.{table_name} dropped successfully." + get_dry_run_text(dry_run))
 
+def alter_all_indices(conn, schema_name, table_name, command, dry_run = False):
+    with conn.cursor() as cursor:
+        # Query to retrieve all non-primary key indices for the table
+        query_get_indices = f"ALTER INDEX ALL ON {schema_name}.{table_name} {command}"
+        execute_sql(cursor, query_get_indices)
+    if not dry_run:
+        conn.commit()
+    print(f"Indices for table {target_schema}.{table_name}: {command}." + get_dry_run_text(dry_run))
+
+
 def get_table_names(conn, schema) -> []:
     cursor = conn.cursor()
     cursor.execute("""
@@ -539,7 +549,6 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
 
             print(" - DONE")
 
-
 # Main process
 if __name__ == '__main__':
     logging.basicConfig() # initializiation needed!!!!
@@ -602,7 +611,7 @@ if __name__ == '__main__':
             sys.exit(0)
 
         table_names = ARGS.tables
-        if ARGS.copy_all_tables:
+        if ARGS.copy_all_tables or (table_names is None and ARGS.compare_table):
             table_names = get_table_names(source_conn, source_schema)
 
         table_names = filter_strings_by_regex(table_names, ARGS.table_filter)
@@ -625,7 +634,7 @@ if __name__ == '__main__':
                         drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
                         create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
 
-                # drop indices before copying data (for better performance) (no need if tables were dropped and recreated just before):
+                # drop indices (no need if tables were dropped and recreated just before):
                 if ARGS.drop_indices and not ARGS.create_table:
                     if ARGS.page_start != 1:
                         print("WARNING: Setting a start page results in ignoring index dropping!")
@@ -634,9 +643,12 @@ if __name__ == '__main__':
 
                 # Copy data from source to target
                 if ARGS.copy_data:
+                    # clustered indices cannot be disabled (then insertion is not possible anymore!)
+                    # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
                     copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size)
+                    # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
-                # create indices after copying data (for better performance)
+                # create indices
                 if ARGS.copy_indices:
                     if ARGS.page_start != 1 and not ARGS.drop_indices:
                         print("WARNING: Setting a start page results in ignoring index creation!")
