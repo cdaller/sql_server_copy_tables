@@ -102,11 +102,10 @@ def create_connection(config) -> pyodbc.Connection:
     
     return pyodbc.connect(conn_str, attrs_before = attrs_before)
 
-
 # Function to get the create table query
 def get_create_table_query(source_cursor, source_schema, table_name, target_schema) -> str:
     # Get column definitions
-    execute_sql(source_cursor,f"""
+    source_cursor.execute(f"""
         SELECT 
             COLUMN_NAME, DATA_TYPE, 
             CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, 
@@ -121,40 +120,56 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     for column in columns:
         col_def = f"{column.COLUMN_NAME} {column.DATA_TYPE}"
 
-        # Add length for character types
+        # Add details for specific data types
         if column.DATA_TYPE in ['varchar', 'nvarchar', 'char', 'nchar', 'binary', 'varbinary']:
             col_def += f"({column.CHARACTER_MAXIMUM_LENGTH})" if column.CHARACTER_MAXIMUM_LENGTH and column.CHARACTER_MAXIMUM_LENGTH > 0 else "(max)"
-        # Add precision for datetime2
         elif column.DATA_TYPE == 'datetime2':
             col_def += f"({column.DATETIME_PRECISION})"
-        # Add precision and scale for decimal and numeric types
         elif column.DATA_TYPE in ['decimal', 'numeric']:
-            precision = column.NUMERIC_PRECISION if column.NUMERIC_PRECISION is not None else 18  # Default precision
-            scale = column.NUMERIC_SCALE if column.NUMERIC_SCALE is not None else 0  # Default scale
+            precision = column.NUMERIC_PRECISION if column.NUMERIC_PRECISION is not None else 18
+            scale = column.NUMERIC_SCALE if column.NUMERIC_SCALE is not None else 0
             col_def += f"({precision}, {scale})"
 
+        # Add NOT NULL constraint
         if column.IS_NULLABLE == 'NO':
             col_def += " NOT NULL"
+        # Add DEFAULT constraint if exists
         if column.COLUMN_DEFAULT:
             col_def += f" DEFAULT {column.COLUMN_DEFAULT}"
 
         column_definitions.append(col_def)
 
-    # Get primary key information
-    execute_sql(source_cursor,f"""
-        SELECT COLUMN_NAME 
-        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
-        WHERE TABLE_SCHEMA = N'{source_schema}' AND TABLE_NAME = N'{table_name}' AND OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1
+    # Improved query to fetch primary key information
+    source_cursor.execute(f"""
+        SELECT 
+            kc.name AS PK_NAME, 
+            i.type_desc AS INDEX_TYPE,
+            STRING_AGG(col.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS COLUMN_NAMES
+        FROM 
+            sys.tables t
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            JOIN sys.indexes i ON t.object_id = i.object_id
+            JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+            JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
+            JOIN sys.key_constraints kc ON t.object_id = kc.parent_object_id AND kc.type = 'PK' AND i.index_id = kc.unique_index_id
+        WHERE 
+            t.name = N'{table_name}' 
+            AND s.name = N'{source_schema}'
+            AND i.is_primary_key = 1
+        GROUP BY kc.name, i.type_desc
     """)
-    primary_keys = [row.COLUMN_NAME for row in source_cursor.fetchall()]
+    pk_info = source_cursor.fetchone()
     
     pk_definition = ''
-    if primary_keys:
-        pk_definition = f", PRIMARY KEY ({', '.join(primary_keys)})"
+    if pk_info:
+        pk_name = pk_info.PK_NAME
+        index_type = "CLUSTERED" if pk_info.INDEX_TYPE == "CLUSTERED" else "NONCLUSTERED"
+        pk_definition = f", CONSTRAINT {pk_name} PRIMARY KEY {index_type} ({pk_info.COLUMN_NAMES})"
 
     # Combine to form CREATE TABLE statement
     create_table_statement = f"CREATE TABLE {target_schema}.{table_name} ({', '.join(column_definitions)}{pk_definition})"
     return create_table_statement
+
 
 # fetch input sizes for decimal columns (see https://github.com/mkleehammer/pyodbc/issues/845)
 def get_input_sizes(conn, schema_name, table_name) -> []:
