@@ -107,7 +107,7 @@ options:
                         Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that
                         this settings does not make much sense if you copy more than one table! (default: 1)
   --copy-view, --no-copy-view
-                        Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: True)
+                        Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: False)
   --view VIEWS [VIEWS ...]
                         Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"
   --view-filter VIEW_FILTER
@@ -210,7 +210,23 @@ Please note that ```--page-start```does only make sense with a single table give
 
 ### Copy Views
 
-Copy one or more views from the source db to the target db:
+Copy all views from the source db to the target db:
+
+```bash
+./mssql_copy_table.py \
+    --source-server localhost \
+    --source-db my-db \
+    --source-schema MYSCHEMA \
+    --source-user xxx \
+    --source-password xxx \
+    --target-server xyzserver.database.windows.net \
+    --target-db azure-db \
+    --target-schema OTHERSCHEMA \
+    --target-authentication AzureActiveDirectory \
+    --copy-view
+```
+
+Limit views to copy by enumerating the view names:
 
 ```bash
 ./mssql_copy_table.py \
@@ -227,7 +243,7 @@ Copy one or more views from the source db to the target db:
     --view VIEW_ABC1 --view VIEW_ABC2 VIEW_ABC3
 ```
 
-or using a regexp filter for view selection:
+or using a regexp for view selection:
 
 ```bash
 ./mssql_copy_table.py \

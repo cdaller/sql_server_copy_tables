@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
     parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
 
-    parser.add_argument('--copy-view', dest='copy_view', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: %(default)s)')
+    parser.add_argument('--copy-view', dest='copy_view', default=False, action=argparse.BooleanOptionalAction, help='Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: %(default)s)')
     parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
     parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
 
