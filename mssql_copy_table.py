@@ -503,7 +503,7 @@ def create_views(conn, schema, view_definitions, dry_run = False):
             # Create the view in the destination database
             print(f"Create view {schema}.{view_name}", end="", flush=True)
             if 'create or alter view' not in view_definition.lower():
-                view_definition = ireplace('create view ', 'create or alter view ', view_definition)
+                view_definition = re.sub(r'create\s+view\s+', 'create or alter view ', view_definition, flags = re.IGNORECASE)
             #print(f"sql: {view_definition}")
             cursor.execute(view_definition)
             print(' - DONE')
