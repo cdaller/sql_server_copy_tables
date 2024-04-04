@@ -11,11 +11,12 @@ except ImportError:
 
 import pyodbc
 from time import perf_counter
-import sys
+import sys, traceback
 import struct
 import argparse
 import re
 import logging
+from typing import List, Dict, Tuple
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
@@ -46,11 +47,15 @@ def parse_args():
 
     parser.add_argument('--compare-table', dest='compare_table', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows. (default: %(default)s)')
 
-    parser.add_argument('-t', '--table', nargs='*', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
+    parser.add_argument('-t', '--table', nargs='+', action='extend', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db. (default: %(default)s)')
     parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
     parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
+
+    parser.add_argument('--copy-view', dest='copy_view', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: %(default)s)')
+    parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
+    parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
@@ -459,8 +464,55 @@ def alter_all_indices(conn, schema_name, table_name, command, dry_run = False):
         conn.commit()
     print(f"Indices for table {target_schema}.{table_name}: {command}." + get_dry_run_text(dry_run))
 
+def ireplace(old, new, text) -> str:
+    idx = 0
+    while idx < len(text):
+        index_l = text.lower().find(old.lower(), idx)
+        if index_l == -1:
+            return text
+        text = text[:index_l] + new + text[index_l + len(old):]
+        idx = index_l + len(new) 
+    return text
 
-def get_table_names(conn, schema) -> []:
+def fetch_view_definitions(conn, source_schema, target_schema) -> Tuple[str, str]:
+    views_query = f"""SELECT o.name AS view_name, m.definition AS view_definition
+        FROM sys.sql_modules m
+                INNER JOIN sys.objects o ON m.object_id = o.object_id
+                INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+        WHERE s.name = '{source_schema}' AND o.type = 'V';
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(views_query)
+        view_definitions = cursor.fetchall()
+
+        modified_views = []
+        for name, definition in view_definitions:
+            # Modify the view definition to replace source schema with target schema
+            # Note: This simplistic replacement assumes that schema names do not appear in other contexts
+            #       where replacement would be incorrect. Adjust logic as needed for complex cases.
+            modified_definition = ireplace(f'{source_schema}.', f'{target_schema}.', definition)
+            modified_definition = ireplace(f'[{source_schema}].', f'[{target_schema}].', modified_definition)
+            modified_views.append((name, modified_definition))
+
+        # print(f"modified_views {modified_views}")
+        return modified_views
+
+def create_views(conn, schema, view_definitions, dry_run = False):
+    with conn.cursor() as cursor:
+        for view_name, view_definition in view_definitions:            
+            # Create the view in the destination database
+            print(f"Create view {schema}.{view_name}", end="", flush=True)
+            if 'create or alter view' not in view_definition.lower():
+                view_definition = ireplace('create view ', 'create or alter view ', view_definition)
+            #print(f"sql: {view_definition}")
+            cursor.execute(view_definition)
+            print(' - DONE')
+    if not dry_run:
+        conn.commit()
+    print(f"Views in schema {target_schema} created" + get_dry_run_text(dry_run))
+    
+
+def get_table_names(conn, schema) -> List[str]:
     cursor = conn.cursor()
     cursor.execute("""
     SELECT TABLE_NAME
@@ -475,7 +527,7 @@ def get_table_names(conn, schema) -> []:
         table_names.append(row.TABLE_NAME)
     return table_names
 
-def filter_strings_by_regex(strings, pattern) -> []:
+def filter_strings_by_regex(strings, pattern) -> List[str]:
     if pattern is None:
         return strings
     regex = re.compile(pattern)
@@ -483,7 +535,7 @@ def filter_strings_by_regex(strings, pattern) -> []:
     return filtered_strings
 
 # Function to fetch index and corresponding columns
-def get_indices(cursor, schema_name, table_name) -> {}:
+def get_indices(cursor, schema_name, table_name) -> Dict[str, str]:
     execute_sql(cursor, f"""
         SELECT i.name AS IndexName, COL_NAME(ic.object_id, ic.column_id) AS ColumnName
         FROM sys.indexes AS i
@@ -625,7 +677,7 @@ if __name__ == '__main__':
                 print(table_name)
             sys.exit(0)
 
-        table_names = ARGS.tables
+        table_names = ARGS.tables if ARGS.tables else []
         if ARGS.copy_all_tables or (table_names is None and ARGS.compare_table):
             table_names = get_table_names(source_conn, source_schema)
 
@@ -669,10 +721,31 @@ if __name__ == '__main__':
                         print("WARNING: Setting a start page results in ignoring index creation!")
                     else:
                         copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+                
+
+        # copy views
+        if ARGS.copy_view:
+            view_definitions = fetch_view_definitions(source_conn, source_schema, target_schema)
+            view_names = []
+            if ARGS.views:
+                view_names = ARGS.views
+                #print(f"view names: {view_names}")
+            else:
+                for view_name, view_definition in view_definitions:
+                    view_names.append(view_name)
+                view_names = filter_strings_by_regex(view_names, ARGS.view_filter)
+                #print(f"view names: {view_names}")
+            
+            view_definitions = [(name, definition) for name, definition in view_definitions if name in view_names]
+            # print(f"view definitions to create: {view_definitions}")
+
+            create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
+
 
 
     except Exception as e:
         print(f"An error occurred: {e}")
+        traceback.print_exc(file=sys.stdout)
     finally:
         if source_conn:
             source_conn.close()
