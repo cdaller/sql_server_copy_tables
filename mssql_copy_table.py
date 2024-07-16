@@ -53,6 +53,9 @@ def parse_args():
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
     parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
 
+    parser.add_argument('--where', dest='where_clause', default = None, help='If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-create-table --no-drop-indices --no-copy-indices". (default: %(default)s)')
+    parser.add_argument('--delete-where', dest='delete_where', default = False, action=argparse.BooleanOptionalAction, help='Delete all rows in the target table using the given where clause if a where clause is set with the "--where" parameter. (default: %(default)s)')
+
     parser.add_argument('--copy-view', dest='copy_view', default=False, action=argparse.BooleanOptionalAction, help='Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: %(default)s)')
     parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
     parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
@@ -252,8 +255,8 @@ def get_numerical_primary_key(source_conn, source_schema, table_name) -> str:
     return None
 
 # Function to copy data from source to target
-def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000):
-    print(f"Copying table {table_name} ...", end="", flush=True)
+def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None):
+    print(f"Copying table {table_name} {'using where clause \"' + where_clause + '\"' if where_clause else ''}...", end="", flush=True)
     start_time = perf_counter()
 
     primary_key = get_numerical_primary_key(source_conn, source_schema, table_name)
@@ -261,7 +264,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         print(f" using primary key '{primary_key}' for optimization ...", end="", flush=True)
 
     with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
-        total_row_count = get_row_count(source_conn, source_schema, table_name)
+        total_row_count = get_row_count(source_conn, source_schema, table_name, where_clause)
         print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
         input_sizes = get_input_sizes(source_conn, source_schema, table_name)
@@ -285,6 +288,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     f"WITH fetching AS ("
                     f"    select p.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
                     f"    from {source_schema}.{table_name} p"
+                    f"    {'WHERE p.' + where_clause if where_clause else ''}"
                     f" )"
                     f" SELECT p.*"
                     f" FROM fetching f"
@@ -294,7 +298,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 )
             else:
                 # Use OFFSET for paging when no numerical primary key is available
-                execute_sql(source_cursor, f"SELECT * FROM {source_schema}.{table_name} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
+                execute_sql(source_cursor, f"SELECT * FROM {source_schema}.{table_name} {'WHERE ' + where_clause if where_clause else ''} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
 
             rows = source_cursor.fetchall()
             if not rows:
@@ -327,6 +331,14 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         rows_per_sec = int(round(total_row_count / duration_sec))
         print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
 
+def delete_data(connection, schema_name, table_name, where_clause, dry_run = False):
+    print(f"Deleting data in table {table_name} using where clause \"{where_clause}\" {get_dry_run_text(dry_run)} ...", end="", flush=True)
+    if not dry_run:
+        with connection.cursor() as cursor:
+            execute_sql(cursor, f"DELETE FROM {schema_name}.{table_name} WHERE {where_clause}")
+        connection.commit()
+    print(" - done")
+
 def truncate_table(connection, schema_name, table_name, dry_run = False):
     print(f"Truncating table {table_name} {get_dry_run_text(dry_run)} ...", end="", flush=True)
     if not dry_run:
@@ -335,9 +347,10 @@ def truncate_table(connection, schema_name, table_name, dry_run = False):
         connection.commit()
     print(" - done")
 
-def get_row_count(connection, schema_name, table_name) -> int:
+def get_row_count(connection, schema_name, table_name, where_clause) -> int:
     cursor = connection.cursor()
-    execute_sql(cursor, f"SELECT COUNT(*) FROM  {schema_name}.{table_name}")
+    sql = f"SELECT COUNT(*) FROM {schema_name}.{table_name} {'WHERE ' + where_clause if where_clause else ''}"
+    execute_sql(cursor, sql)
     total_rows = cursor.fetchone()[0]
     return total_rows
 
@@ -708,11 +721,15 @@ if __name__ == '__main__':
                     else:
                         drop_all_indices(target_conn, target_schema, table_name, ARGS.dry_run)
 
+                # If a where clause is set and the rows should also be deleted first:
+                if ARGS.where_clause and ARGS.delete_where:
+                    delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.dry_run)
+
                 # Copy data from source to target
                 if ARGS.copy_data:
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
-                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size)
+                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause)
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
                 # create indices

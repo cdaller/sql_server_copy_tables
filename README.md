@@ -53,9 +53,11 @@ python3 -m pip install azure-identity
 ```bash
 ./mssql_copy_table.py --help
 usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER] --source-server SOURCE_SERVER --source-db SOURCE_DB [--source-schema SOURCE_SCHEMA] [--source-authentication SOURCE_AUTHENTICATION] [--source-user SOURCE_USER]
-                           [--source-password SOURCE_PASSWORD] [--source-list-tables] [--target-driver TARGET_DRIVER] --target-server TARGET_SERVER --target-db TARGET_DB [--target-schema TARGET_SCHEMA] [--target-authentication TARGET_AUTHENTICATION]
-                           [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table] [--create-table | --no-create-table] [--copy-indices | --no-copy-indices]
-                           [--copy-data | --no-copy-data] [--dry-run] [--compare-table | --no-compare-table] [-t [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START]
+                           [--source-password SOURCE_PASSWORD] [--source-list-tables] [--target-driver TARGET_DRIVER] --target-server TARGET_SERVER --target-db TARGET_DB [--target-schema TARGET_SCHEMA]
+                           [--target-authentication TARGET_AUTHENTICATION] [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table]
+                           [--create-table | --no-create-table] [--copy-indices | --no-copy-indices] [--drop-indices | --no-drop-indices] [--copy-data | --no-copy-data] [--dry-run] [--compare-table | --no-compare-table]
+                           [-t TABLES [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START] [--where WHERE_CLAUSE] [--delete-where | --no-delete-where]
+                           [--copy-view | --no-copy-view] [--view VIEWS [VIEWS ...]] [--view-filter VIEW_FILTER] [--debug-sql]
 
 Copy one or more tables from an sql server to another sql server
 
@@ -94,8 +96,8 @@ options:
   --truncate-table, --no-truncate-table
                         If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used! (default: False)
   --create-table, --no-create-table
-                        If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag
-                        (default: True)
+                        If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table
+                        will also be recreated if not prevented by --no-copy-indices flag (default: True)
   --copy-indices, --no-copy-indices
                         Create the indices for the target tables as they exist on the source table (default: True)
   --drop-indices, --no-drop-indices
@@ -113,8 +115,12 @@ options:
   --page-size PAGE_SIZE
                         Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: 50000)
   --page-start PAGE_START
-                        Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that
-                        this settings does not make much sense if you copy more than one table! (default: 1)
+                        Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number
+                        shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: 1)
+  --where WHERE_CLAUSE  If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-create-table --no-drop-indices --no-
+                        copy-indices". (default: None)
+  --delete-where, --no-delete-where
+                        Delete all rows in the target table using the given where clause if a where clause is set with the "--where" parameter. (default: False)
   --copy-view, --no-copy-view
                         Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: False)
   --view VIEWS [VIEWS ...]
@@ -171,7 +177,6 @@ Only copy some tables and do not create them, but only truncate them before copy
 
 ### Copy Tables with Regexp Filter and Page Size
 
-
 Copy tables using a regular expression for the table names. Use azure databases with azure identity to login (```--target-authentication AzureActiveDirectory```). Also use a larger page size than the default 50000 rows:
 
 ```bash
@@ -215,6 +220,28 @@ Please note that ```--page-start```does only make sense with a single table give
     --target-authentication AzureActiveDirectory \
     --table TABLE_A \
     --page-start 14
+```
+
+### Copy only some rows using a where clause
+
+Copy only a selected set of rows using a where clause. To prevent a table and indices recreation (as only some rows should be added) use the additional params ```--no-create-table --no-drop-indices --no-copy-indices```.
+
+The ```--delete-where``` ensures that the rows in the target table are deleted before the rows are copied from the source table using the where clause. Like this, the copy command can be executed repeatedly.
+
+```bash
+./mssql_copy_table.py \
+    --source-server localhost \
+    --source-db my-db \
+    --source-schema MYSCHEMA \
+    --source-user xxx \
+    --source-password xxx \
+    --target-server xyzserver.database.windows.net \
+    --target-db azure-db \
+    --target-schema OTHERSCHEMA \
+    --target-authentication AzureActiveDirectory \
+    --where "id >= 10000 and id < 20000" \
+    --delete-where \
+    --no-create-table --no-drop-indices --no-copy-indices
 ```
 
 ### Copy Views
