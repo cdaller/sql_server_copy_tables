@@ -16,6 +16,12 @@ The script uses pyodbc:
 
 ```bash
 pip install pyodbc
+
+# python >= 3.12:
+mkdir .venv
+python3 -m venv .venv 
+source .venv/bin/activate
+python3 -m pip install pyodbc
 ```
 
 And it needs some odbc drivers from microsoft.
@@ -37,6 +43,9 @@ Optional: If you want to use Azure Active Directory authentiation, you need to i
 
 ```bash
 pip install azure-identity
+
+# python >= 3.12 using venv:
+python3 -m pip install azure-identity
 ```
 
 ## Help
