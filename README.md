@@ -1,6 +1,6 @@
 # Sql Server Copy Tables and Views
 
-This python script is able to copy one or more tables or views from one sql server database/schema to another.
+This python script is able to copy one or more tables (selected rows) or views from one sql server database/schema to another.
 
 If the tables already exist, it is able to truncate them or if they do not exist yet, if creates them and fills them with data.
 
