@@ -795,7 +795,8 @@ if __name__ == '__main__':
 
                 # If a where clause is set and the rows should also be deleted first:
                 if ARGS.where_clause and ARGS.delete_where:
-                    status_id = f'delete_data_{target_schema}.{table_name}{"." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''}'
+                    id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
+                    status_id = f'delete_data_{target_schema}.{table_name}{id_where_clause}'
                     execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.dry_run))
                     
 
@@ -803,7 +804,8 @@ if __name__ == '__main__':
                 if ARGS.copy_data:
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
-                    status_id = f'copy_{source_schema}.{table_name}{"." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''}'
+                    id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
+                    status_id = f'copy_{source_schema}.{table_name}{id_where_clause}'
                     execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause))
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
