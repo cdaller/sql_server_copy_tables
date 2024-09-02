@@ -215,9 +215,9 @@ def get_input_sizes(conn, schema_name, table_name) -> []:
 
     return input_sizes
 
-def get_numerical_primary_key(source_conn, source_schema, table_name) -> str:
+def get_primary_key(source_conn, source_schema, table_name):
     """
-    Determine if the given table has a numerical primary key and return its column name.
+    Return all primar key columns comma separated
 
     :param source_conn: The database connection object.
     :param source_schema: The schema of the table.
@@ -243,16 +243,38 @@ def get_numerical_primary_key(source_conn, source_schema, table_name) -> str:
         """
         execute_sql(cursor, pk_query)
         rows = cursor.fetchall()
-        if len(rows) != 1:
-            # deny if none or more than one column (combined primary key)
-            return None
+        return rows
 
-        row = rows[0]
-        # Check if primary key exists and is numerical
-        if row and row.DATA_TYPE in ['int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal']:
-            return row.COLUMN_NAME
+
+def get_numerical_primary_key(source_conn, source_schema, table_name) -> str:
+    """
+    Determine if the given table has a numerical primary key and return its column name.
+
+    :param source_conn: The database connection object.
+    :param source_schema: The schema of the table.
+    :param table_name: The name of the table.
+    :return: The name of the numerical primary key column, or None if not found.
+    """
+    rows = get_primary_key(source_conn, source_schema, table_name)
+    if len(rows) != 1:
+        # deny if none or more than one column (combined primary key)
+        return None
+
+    row = rows[0]
+    # Check if primary key exists and is numerical
+    if row and row.DATA_TYPE in ['int', 'bigint', 'smallint', 'tinyint', 'numeric', 'decimal']:
+        return row.COLUMN_NAME
 
     return None
+
+def get_primary_key_column_names(source_conn, source_schema, table_name):
+    rows = get_primary_key(source_conn, source_schema, table_name)
+    if len(rows) == 0:
+        return None
+    primary_key_columns = [row.COLUMN_NAME for row in rows]
+    primary_key_columns_str = ', '.join(primary_key_columns)
+    return primary_key_columns_str
+
 
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None):
@@ -298,7 +320,15 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 )
             else:
                 # Use OFFSET for paging when no numerical primary key is available
-                execute_sql(source_cursor, f"SELECT * FROM {source_schema}.{table_name} {'WHERE ' + where_clause if where_clause else ''} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY")
+                primary_key_column_names = get_primary_key_column_names(source_conn, source_schema, table_name)
+                if not primary_key_column_names:
+                    primary_key_column_names = '(SELECT NULL)'
+                execute_sql(source_cursor, 
+                    f"SELECT * FROM {source_schema}.{table_name}"
+                    f" {'WHERE ' + where_clause if where_clause else ''}"
+                    f" ORDER BY {primary_key_column_names} "
+                    f" OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY"
+                )
 
             rows = source_cursor.fetchall()
             if not rows:
