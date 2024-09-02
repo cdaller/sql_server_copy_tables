@@ -758,11 +758,10 @@ if __name__ == '__main__':
 
             create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
 
-
-
     except Exception as e:
         print(f"An error occurred: {e}")
         traceback.print_exc(file=sys.stdout)
+        sys.exit(-1)
     finally:
         if source_conn:
             source_conn.close()
