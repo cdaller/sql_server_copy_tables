@@ -16,7 +16,12 @@ import struct
 import argparse
 import re
 import logging
+from datetime import datetime
 from typing import List, Dict, Tuple
+
+STATUS_START = 'START'
+STATUS_SUCCESS = 'SUCCESS'
+STATUS_ERROR = 'ERROR'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
@@ -61,6 +66,9 @@ def parse_args():
     parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
+
+    parser.add_argument('--progress-track-file', dest='progress_file_name', default = None, help='If set, a file with the given name is used to remember which tables/views it already processed sucessfully. If the script is restarted, all tables/views are not processed that were processed sucessfully before.". (default: %(default)s)')
+
 
     return parser
 
@@ -278,7 +286,7 @@ def get_primary_key_column_names(source_conn, source_schema, table_name):
 
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None):
-    print(f"Copying table {table_name} {'using where clause \"' + where_clause + '\"' if where_clause else ''}...", end="", flush=True)
+    print(f"Copying table {table_name} {'using where clause [' + where_clause + ']' if where_clause else ''}...", end="", flush=True)
     start_time = perf_counter()
 
     primary_key = get_numerical_primary_key(source_conn, source_schema, table_name)
@@ -287,7 +295,8 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
     with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
         total_row_count = get_row_count(source_conn, source_schema, table_name, where_clause)
-        print(f" {total_row_count} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
+        # use '_' as thousands separator for row count for better readability
+        print(f" {total_row_count:_} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
         input_sizes = get_input_sizes(source_conn, source_schema, table_name)
         target_cursor.fast_executemany = True
@@ -340,11 +349,11 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             if row_count == page_size:
                 if print_page_info:
-                    print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size} rows, page", end="")
+                    print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size:_} rows, page", end="")
                     print_page_info = False
                 print(f" {page_count}r({duration_sec_page_read:.1f}s)", end="", flush=True)
             else:
-                print(f" read {row_count} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
+                print(f" read {row_count:_} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
 
             if not dry_run:
                 placeholders = ', '.join(['?' for _ in rows[0]])
@@ -659,6 +668,31 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
 
             print(" - DONE")
 
+def has_progress_track_success(file_name, id) -> bool:
+    if not file_name:
+        return False
+    
+    with open(file_name, 'r') as file:
+        for line in file:
+            if line.startswith(f'{id}: {STATUS_SUCCESS}'):
+                return True
+    return False
+
+def write_progress_track(file_name, id, status):
+    if file_name:
+        with open(file_name, "a") as file:
+            now = datetime.now()
+            now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
+            file.write(f'{id}: {status} @{now_str}\n')
+
+def execute_with_progress_track(file_name, id, function):
+    write_progress_track(file_name, status_id, STATUS_START)
+    if has_progress_track_success(file_name, id):
+        print(f'Skipping {id}, was already processed before!')
+    else:
+        function() # passed as lambda
+    write_progress_track(ARGS.progress_file_name, status_id, STATUS_SUCCESS)
+
 # Main process
 if __name__ == '__main__':
     logging.basicConfig() # initializiation needed!!!!
@@ -736,30 +770,41 @@ if __name__ == '__main__':
                     if ARGS.page_start != 1:
                         print("WARNING: Setting a start page and truncating the table does not make sense! - ignore the truncation!")
                     else:
-                        truncate_table(target_conn, target_schema, table_name, ARGS.dry_run)
+                        status_id = f'truncate_{target_schema}.{table_name}'
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: truncate_table(target_conn, target_schema, table_name, ARGS.dry_run))
+                        
                 elif ARGS.create_table:
                     if ARGS.page_start != 1:
                         print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
                     else:
-                        drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run)
-                        create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+                        status_id = f'drop-table_{target_schema}.{table_name}'
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run))
+                        
+                        status_id = f'create-table_{target_schema}.{table_name}'
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run))
+                        
 
                 # drop indices (no need if tables were dropped and recreated just before):
                 if ARGS.drop_indices and not ARGS.create_table:
                     if ARGS.page_start != 1:
                         print("WARNING: Setting a start page results in ignoring index dropping!")
                     else:
-                        drop_all_indices(target_conn, target_schema, table_name, ARGS.dry_run)
+                        status_id = f'drop_indices_{target_schema}.{table_name}'
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_all_indices(target_conn, target_schema, table_name, ARGS.dry_run))
+                        
 
                 # If a where clause is set and the rows should also be deleted first:
                 if ARGS.where_clause and ARGS.delete_where:
-                    delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.dry_run)
+                    status_id = f'delete_data_{target_schema}.{table_name}{"." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''}'
+                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.dry_run))
+                    
 
                 # Copy data from source to target
                 if ARGS.copy_data:
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
-                    copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause)
+                    status_id = f'copy_{source_schema}.{table_name}{"." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''}'
+                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause))
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
                 # create indices
@@ -767,7 +812,8 @@ if __name__ == '__main__':
                     if ARGS.page_start != 1 and not ARGS.drop_indices:
                         print("WARNING: Setting a start page results in ignoring index creation!")
                     else:
-                        copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run)
+                        status_id = f'copy-indices_{source_schema}.{table_name}'
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run))
                 
 
         # copy views
@@ -786,6 +832,7 @@ if __name__ == '__main__':
             view_definitions = [(name, definition) for name, definition in view_definitions if name in view_names]
             # print(f"view definitions to create: {view_definitions}")
 
+            # ignore progress/status here, as operation is fast!
             create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
 
     except Exception as e:
