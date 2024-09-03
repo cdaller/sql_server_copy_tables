@@ -688,7 +688,7 @@ def write_progress_track(file_name, id, status):
 def execute_with_progress_track(file_name, id, function):
     write_progress_track(file_name, status_id, STATUS_START)
     if has_progress_track_success(file_name, id):
-        print(f'Skipping {id}, was already processed before!')
+        print(f'Skipping {id}, was already processed sucessfully before (see {file_name}!')
     else:
         function() # passed as lambda
     write_progress_track(ARGS.progress_file_name, status_id, STATUS_SUCCESS)
