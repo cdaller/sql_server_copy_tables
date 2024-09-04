@@ -60,6 +60,7 @@ def parse_args():
 
     parser.add_argument('--where', dest='where_clause', default = None, help='If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-create-table --no-drop-indices --no-copy-indices". (default: %(default)s)')
     parser.add_argument('--delete-where', dest='delete_where', default = False, action=argparse.BooleanOptionalAction, help='Delete all rows in the target table using the given where clause if a where clause is set with the "--where" parameter. (default: %(default)s)')
+    parser.add_argument('--join', nargs='+', action='extend', dest='joins', default = None, help='Add one or more joins to the selection of data (probably only useful in combination with the --where clause). The original table name is \"source_table\" to use in the joins. Either use the parameter multiple times or separate the joins with spaces.". (default: %(default)s)')
 
     parser.add_argument('--copy-view', dest='copy_view', default=False, action=argparse.BooleanOptionalAction, help='Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: %(default)s)')
     parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
@@ -285,7 +286,7 @@ def get_primary_key_column_names(source_conn, source_schema, table_name):
 
 
 # Function to copy data from source to target
-def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None):
+def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None, joins=None):
     print(f"Copying table {table_name} {'using where clause [' + where_clause + ']' if where_clause else ''}...", end="", flush=True)
     start_time = perf_counter()
 
@@ -294,7 +295,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         print(f" using primary key '{primary_key}' for optimization ...", end="", flush=True)
 
     with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
-        total_row_count = get_row_count(source_conn, source_schema, table_name, where_clause)
+        total_row_count = get_row_count(source_conn, source_schema, table_name, where_clause, joins)
         # use '_' as thousands separator for row count for better readability
         print(f" {total_row_count:_} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
@@ -312,31 +313,37 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             page_count += 1
 
+            join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
+
             if primary_key:
                 # Use primary key for efficient paging
                 # see https://erikdarling.com/considerations-for-paging-queries-in-sql-server-with-batch-mode-dont-use-offset-fetch/
-                execute_sql(source_cursor,
-                    f"WITH fetching AS ("
-                    f"    select p.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY p.{primary_key})"
-                    f"    from {source_schema}.{table_name} p"
-                    f"    {'WHERE p.' + where_clause if where_clause else ''}"
-                    f" )"
-                    f" SELECT p.*"
-                    f" FROM fetching f"
-                    f" JOIN {source_schema}.{table_name} p ON p.{primary_key} = f.{primary_key}"
-                    f" WHERE f.n > {offset} and f.n <= {offset + page_size}"
-                    f" OPTION (RECOMPILE)"
+                execute_sql(source_cursor, f"""
+                    WITH fetching AS (
+                        SELECT source_table.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY source_table.{primary_key})
+                        FROM {source_schema}.{table_name} source_table
+                        { join_sql }
+                        {'WHERE ' + where_clause if where_clause else ''}
+                    )
+                    SELECT source_table.*
+                    FROM fetching f
+                    JOIN {source_schema}.{table_name} source_table ON source_table.{primary_key} = f.{primary_key}
+                    WHERE f.n > {offset} and f.n <= {offset + page_size}
+                    OPTION (RECOMPILE)
+                    """
                 )
             else:
                 # Use OFFSET for paging when no numerical primary key is available
                 primary_key_column_names = get_primary_key_column_names(source_conn, source_schema, table_name)
                 if not primary_key_column_names:
                     primary_key_column_names = '(SELECT NULL)'
-                execute_sql(source_cursor, 
-                    f"SELECT * FROM {source_schema}.{table_name}"
-                    f" {'WHERE ' + where_clause if where_clause else ''}"
-                    f" ORDER BY {primary_key_column_names} "
-                    f" OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY"
+                execute_sql(source_cursor, f"""
+                    SELECT * FROM {source_schema}.{table_name} source_table
+                    { join_sql }
+                    {'WHERE ' + where_clause if where_clause else ''}
+                    ORDER BY {primary_key_column_names}
+                    OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
+                    """
                 )
 
             rows = source_cursor.fetchall()
@@ -370,11 +377,12 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         rows_per_sec = int(round(total_row_count / duration_sec))
         print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
 
-def delete_data(connection, schema_name, table_name, where_clause, dry_run = False):
+def delete_data(connection, schema_name, table_name, where_clause, joins, dry_run = False):
     print(f"Deleting data in table {table_name} using where clause \"{where_clause}\" {get_dry_run_text(dry_run)} ...", end="", flush=True)
     if not dry_run:
         with connection.cursor() as cursor:
-            execute_sql(cursor, f"DELETE FROM {schema_name}.{table_name} WHERE {where_clause}")
+            join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
+            execute_sql(cursor, f"DELETE source_table FROM {schema_name}.{table_name} source_table {join_sql} WHERE {where_clause}")
         connection.commit()
     print(" - done")
 
@@ -386,12 +394,13 @@ def truncate_table(connection, schema_name, table_name, dry_run = False):
         connection.commit()
     print(" - done")
 
-def get_row_count(connection, schema_name, table_name, where_clause) -> int:
-    cursor = connection.cursor()
-    sql = f"SELECT COUNT(*) FROM {schema_name}.{table_name} {'WHERE ' + where_clause if where_clause else ''}"
-    execute_sql(cursor, sql)
-    total_rows = cursor.fetchone()[0]
-    return total_rows
+def get_row_count(connection, schema_name, table_name, where_clause, joins) -> int:
+    with connection.cursor() as cursor:
+        join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
+        sql = f"SELECT COUNT(*) FROM {schema_name}.{table_name} source_table {join_sql} {'WHERE ' + where_clause if where_clause else ''}"
+        execute_sql(cursor, sql)
+        total_rows = cursor.fetchone()[0]
+        return total_rows
 
 def create_table(source_conn, target_conn, source_schema, table_name, target_schema, dry_run = False):
     # Create table in target database (including primary key and null constraints)
@@ -527,7 +536,8 @@ def ireplace(old, new, text) -> str:
     return text
 
 def fetch_view_definitions(conn, source_schema, target_schema) -> Tuple[str, str]:
-    views_query = f"""SELECT o.name AS view_name, m.definition AS view_definition
+    views_query = f"""
+        SELECT o.name AS view_name, m.definition AS view_definition
         FROM sys.sql_modules m
                 INNER JOIN sys.objects o ON m.object_id = o.object_id
                 INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
@@ -567,11 +577,11 @@ def create_views(conn, schema, view_definitions, dry_run = False):
 def get_table_names(conn, schema) -> List[str]:
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT TABLE_NAME
-    FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_SCHEMA = ?
-        AND TABLE_TYPE = 'BASE TABLE'
-    ORDER BY TABLE_NAME
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = ?
+            AND TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_NAME
     """, (schema))
 
     table_names = []
@@ -797,7 +807,7 @@ if __name__ == '__main__':
                 if ARGS.where_clause and ARGS.delete_where:
                     id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
                     status_id = f'delete_data_{target_schema}.{table_name}{id_where_clause}'
-                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.dry_run))
+                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.joins, ARGS.dry_run))
                     
 
                 # Copy data from source to target
@@ -805,8 +815,9 @@ if __name__ == '__main__':
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
                     id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
-                    status_id = f'copy_{source_schema}.{table_name}{id_where_clause}'
-                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause))
+                    id_joins = "." + ".".join(ARGS.joins) if ARGS.joins else ''
+                    status_id = f'copy_{source_schema}.{table_name}{id_where_clause}{id_joins}'
+                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause, ARGS.joins))
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
                 # create indices

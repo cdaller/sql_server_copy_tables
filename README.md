@@ -52,12 +52,15 @@ python3 -m pip install azure-identity
 
 ```bash
 ./mssql_copy_table.py --help
-usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER] --source-server SOURCE_SERVER --source-db SOURCE_DB [--source-schema SOURCE_SCHEMA] [--source-authentication SOURCE_AUTHENTICATION] [--source-user SOURCE_USER]
-                           [--source-password SOURCE_PASSWORD] [--source-list-tables] [--target-driver TARGET_DRIVER] --target-server TARGET_SERVER --target-db TARGET_DB [--target-schema TARGET_SCHEMA]
-                           [--target-authentication TARGET_AUTHENTICATION] [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table]
-                           [--create-table | --no-create-table] [--copy-indices | --no-copy-indices] [--drop-indices | --no-drop-indices] [--copy-data | --no-copy-data] [--dry-run] [--compare-table | --no-compare-table]
-                           [-t TABLES [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START] [--where WHERE_CLAUSE] [--delete-where | --no-delete-where]
-                           [--copy-view | --no-copy-view] [--view VIEWS [VIEWS ...]] [--view-filter VIEW_FILTER] [--debug-sql]
+
+usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER] --source-server SOURCE_SERVER --source-db SOURCE_DB [--source-schema SOURCE_SCHEMA]
+                           [--source-authentication SOURCE_AUTHENTICATION] [--source-user SOURCE_USER] [--source-password SOURCE_PASSWORD] [--source-list-tables]
+                           [--target-driver TARGET_DRIVER] --target-server TARGET_SERVER --target-db TARGET_DB [--target-schema TARGET_SCHEMA] [--target-authentication TARGET_AUTHENTICATION]
+                           [--target-user TARGET_USER] [--target-password TARGET_PASSWORD] [--target-list-tables] [--truncate-table | --no-truncate-table]
+                           [--create-table | --no-create-table] [--copy-indices | --no-copy-indices] [--drop-indices | --no-drop-indices] [--copy-data | --no-copy-data] [--dry-run]
+                           [--compare-table | --no-compare-table] [-t TABLES [TABLES ...]] [--all-tables] [--table-filter TABLE_FILTER] [--page-size PAGE_SIZE] [--page-start PAGE_START]
+                           [--where WHERE_CLAUSE] [--delete-where | --no-delete-where] [--join JOINS [JOINS ...]] [--copy-view | --no-copy-view] [--view VIEWS [VIEWS ...]]
+                           [--view-filter VIEW_FILTER] [--debug-sql] [--progress-track-file PROGRESS_FILE_NAME]
 
 Copy one or more tables from an sql server to another sql server
 
@@ -94,10 +97,11 @@ options:
                         source database password, if authentication is set to UsenamePassword
   --target-list-tables  If set, a list of tables is printed, no data is copied!
   --truncate-table, --no-truncate-table
-                        If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used! (default: False)
+                        If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used!
+                        (default: False)
   --create-table, --no-create-table
-                        If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table
-                        will also be recreated if not prevented by --no-copy-indices flag (default: True)
+                        If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will
+                        also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag (default: True)
   --copy-indices, --no-copy-indices
                         Create the indices for the target tables as they exist on the source table (default: True)
   --drop-indices, --no-drop-indices
@@ -106,21 +110,27 @@ options:
                         Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: True)
   --dry-run             Do not modify target database, just print what would happen. (default: False)
   --compare-table, --no-compare-table
-                        If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows. (default: False)
+                        If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows. (default:
+                        False)
   -t TABLES [TABLES ...], --table TABLES [TABLES ...]
                         Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"
   --all-tables          Copy all tables in the schema from the source db to the target db. (default: False)
   --table-filter TABLE_FILTER
                         Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: None)
   --page-size PAGE_SIZE
-                        Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: 50000)
+                        Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of
+                        rows, etc.). (default: 50000)
   --page-start PAGE_START
-                        Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number
-                        shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: 1)
-  --where WHERE_CLAUSE  If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-create-table --no-drop-indices --no-
-                        copy-indices". (default: None)
+                        Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is
+                        read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than
+                        one table! (default: 1)
+  --where WHERE_CLAUSE  If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-
+                        create-table --no-drop-indices --no-copy-indices". (default: None)
   --delete-where, --no-delete-where
                         Delete all rows in the target table using the given where clause if a where clause is set with the "--where" parameter. (default: False)
+  --join JOINS [JOINS ...]
+                        Add one or more joins to the selection of data (probably only useful in combination with the --where clause). The original table name is "source_table" to use in the
+                        joins. Either use the parameter multiple times or separate the joins with spaces.". (default: None)
   --copy-view, --no-copy-view
                         Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: False)
   --view VIEWS [VIEWS ...]
@@ -128,7 +138,9 @@ options:
   --view-filter VIEW_FILTER
                         Filter view names using this regular expression (regexp must match view names). (default: None)
   --debug-sql           If enabled, prints sql statements. (default: 0)
-```
+  --progress-track-file PROGRESS_FILE_NAME
+                        If set, a file with the given name is used to remember which tables/views it already processed sucessfully. If the script is restarted, all tables/views are not
+                        processed that were processed sucessfully before.". (default: None)```
 
 ## Examples
 
@@ -239,8 +251,34 @@ The ```--delete-where``` ensures that the rows in the target table are deleted b
     --target-db azure-db \
     --target-schema OTHERSCHEMA \
     --target-authentication AzureActiveDirectory \
+    --table User \
     --where "id >= 10000 and id < 20000" \
     --delete-where \
+    --no-create-table --no-drop-indices --no-copy-indices
+```
+
+#### JOINing other tables
+
+If the where clause needs other tables to determine which rows to read, one can use ```--join``` to join other tables and use columns from the joint tables in the where clause.
+The alias of the table to be copied is always `source_table`, the alias of the join table can be freely chosen by you.
+
+The following example will join the table `country` on the `country_id` with the `User` table that should be copied and limit the rows to copy to european users:
+
+```bash
+./mssql_copy_table.py \
+    --source-server localhost \
+    --source-db my-db \
+    --source-schema MYSCHEMA \
+    --source-user xxx \
+    --source-password xxx \
+    --target-server xyzserver.database.windows.net \
+    --target-db azure-db \
+    --target-schema OTHERSCHEMA \
+    --target-authentication AzureActiveDirectory \
+    --table User \
+    --where "source_table.id >= 10000 and source_table.id < 20000 and country.CONTINENT = 'Europe'" \
+    --delete-where \
+    --join "COUNTRY country ON source_table.country_id = country.country_id"
     --no-create-table --no-drop-indices --no-copy-indices
 ```
 
