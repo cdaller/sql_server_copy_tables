@@ -360,7 +360,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     print_page_info = False
                 print(f" {page_count}r({duration_sec_page_read:.1f}s)", end="", flush=True)
             else:
-                print(f" read {row_count:_} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
+                print(f" reading {row_count:_} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
 
             if not dry_run:
                 placeholders = ', '.join(['?' for _ in rows[0]])
