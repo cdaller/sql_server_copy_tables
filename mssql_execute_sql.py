@@ -21,12 +21,12 @@ import logging
 def parse_args():
     parser = argparse.ArgumentParser(description='Execute an sql command on an sql server')
 
-    parser.add_argument('--source-driver', dest='source_driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver (default: %(default)s)')
-    parser.add_argument('--source-server', dest='source_server', help='source database server name', required=True)
-    parser.add_argument('--source-db', dest='source_db', help='source database name', required=True)
-    parser.add_argument('--source-authentication', dest='source_authentication', default='UsernamePassword', help='source database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
-    parser.add_argument('--source-user', dest='source_user', help='source database username, if authentication is set to UsenamePassword')
-    parser.add_argument('--source-password', dest='source_password', help='source database password, if authentication is set to UsenamePassword')
+    parser.add_argument('--driver', dest='driver', default='{ODBC Driver 18 for SQL Server}', help='source database server driver (default: %(default)s)')
+    parser.add_argument('--server', dest='server', help='source database server name', required=True)
+    parser.add_argument('--db', dest='db', help='source database name', required=True)
+    parser.add_argument('--authentication', dest='authentication', default='UsernamePassword', help='source database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
+    parser.add_argument('--user', dest='user', help='source database username, if authentication is set to UsenamePassword')
+    parser.add_argument('--password', dest='password', help='source database password, if authentication is set to UsenamePassword')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
@@ -116,18 +116,18 @@ if __name__ == '__main__':
         sql_logger.setLevel(logging.DEBUG)
 
     source_config = { 
-        'driver': ARGS.source_driver,
-        'server': ARGS.source_server,
-        'database': ARGS.source_db,
-        'authentication': ARGS.source_authentication,
-        'user': ARGS.source_user,
-        'password': ARGS.source_password,
+        'driver': ARGS.driver,
+        'server': ARGS.server,
+        'database': ARGS.db,
+        'authentication': ARGS.authentication,
+        'user': ARGS.user,
+        'password': ARGS.password,
     }
 
     connection = None
     try:
         # Create connections
-        print(f'connecting to source server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True)
+        print(f'connecting to server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True)
         connection = create_connection(source_config)
         print(' - DONE')
 
