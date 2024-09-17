@@ -30,8 +30,8 @@ def parse_args():
     parser.add_argument('--source-db', dest='source_db', help='source database name', required=True)
     parser.add_argument('--source-schema', dest='source_schema', default='dbo', help='source database schema name (default: %(default)s)')
     parser.add_argument('--source-authentication', dest='source_authentication', default='UsernamePassword', help='source database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
-    parser.add_argument('--source-user', dest='source_user', help='source database username, if authentication is set to UsenamePassword')
-    parser.add_argument('--source-password', dest='source_password', help='source database password, if authentication is set to UsenamePassword')
+    parser.add_argument('--source-user', dest='source_user', help='source database username, if authentication is set to UsernamePassword')
+    parser.add_argument('--source-password', dest='source_password', help='source database password, if authentication is set to UsernamePassword')
     parser.add_argument('--source-list-tables', dest='source_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied! (default: %(default)s)')
 
     parser.add_argument('--target-driver', dest='target_driver', default='{ODBC Driver 18 for SQL Server}', help='target database server driver (default: %(default)s)')
@@ -39,8 +39,8 @@ def parse_args():
     parser.add_argument('--target-db', dest='target_db', help='target database name', required=True)
     parser.add_argument('--target-schema', dest='target_schema', default='dbo', help='target database schema name (default: %(default)s)')
     parser.add_argument('--target-authentication', dest='target_authentication', default='UsernamePassword', help='target database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
-    parser.add_argument('--target-user', dest='target_user', help='source database username, if authentication is set to UsenamePassword')
-    parser.add_argument('--target-password', dest='target_password', help='source database password, if authentication is set to UsenamePassword')
+    parser.add_argument('--target-user', dest='target_user', help='source database username, if authentication is set to UsernamePassword')
+    parser.add_argument('--target-password', dest='target_password', help='source database password, if authentication is set to UsernamePassword')
     parser.add_argument('--target-list-tables', dest='target_list_tables', default=False, action='store_true', help='If set, a list of tables is printed, no data is copied!')
 
     parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used! (default: %(default)s)')
@@ -674,7 +674,7 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
             target_row_count = target_cursor.fetchone()[0]
 
             if source_row_count != target_row_count:
-                print(f"\n-  Row count differs: Source({source_row_count}) vs Target({target_row_count})")
+                print(f"\n-  Row count differs: Source({source_row_count:_}) vs Target({target_row_count:_})")
 
             print(" - DONE")
 
