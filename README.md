@@ -376,6 +376,6 @@ but skip them and right start with the fifth table:
     --progress-track-file progress-dbo.track
 ```
 
-The ```file progress-dbo.track``` will be created and every sucessfull copy step is logged there. On a restart
+The file ```progress-dbo.track``` will be created and every sucessfull copy step is logged there. On a restart
 of the same command, the entries in the track file are checked if there were successfully executed before. In this 
 case they will be skipped and continued with the next operation.
