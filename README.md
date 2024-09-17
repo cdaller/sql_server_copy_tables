@@ -351,3 +351,31 @@ Compare all/selected tables. This will show if there is a table missing, indices
     --compare-table \
     --all-tables
 ```
+
+### Track Progress
+
+Using the progress tracker allows a command to be restarted without redoing all operations that were
+done successfully before. So if you want to copy 10 tables and the network connection break after the 
+fifth table, restaring the same operation using a progress track file will not copy the first four tables
+but skip them and right start with the fifth table:
+
+```bash
+./mssql_copy_table.py \
+    --source-server localhost \
+    --source-db my-db \
+    --source-schema dbo \
+    --source-user xxx \
+    --source-password xxx \
+    --target-server anotherserver.foo.bar.com \
+    --target-db my-db \
+    --target-schema dbo \
+    --target-user xxx \
+    --target-password xxx \
+    --create-table \
+    --all-tables \
+    --progress-track-file progress-dbo.track
+```
+
+The ```file progress-dbo.track``` will be created and every sucessfull copy step is logged there. On a restart
+of the same command, the entries in the track file are checked if there were successfully executed before. In this 
+case they will be skipped and continued with the next operation.
