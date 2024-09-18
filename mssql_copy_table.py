@@ -51,6 +51,7 @@ def parse_args():
     parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen. (default: %(default)s)')
 
     parser.add_argument('--compare-table', dest='compare_table', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target table(s) and print if there are any differences in columns, indices or content rows. (default: %(default)s)')
+    parser.add_argument('--compare-view', dest='compare_view', default=False, action=argparse.BooleanOptionalAction, help='If set, do not copy any data, but compare the source and the target view(s) and print if there are any differences in columns. (default: %(default)s)')
 
     parser.add_argument('-t', '--table', nargs='+', action='extend', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db. (default: %(default)s)')
@@ -572,7 +573,7 @@ def create_views(conn, schema, view_definitions, dry_run = False):
     if not dry_run:
         conn.commit()
     print(f"Views in schema {target_schema} created" + get_dry_run_text(dry_run))
-    
+
 
 def get_table_names(conn, schema) -> List[str]:
     cursor = conn.cursor()
@@ -617,11 +618,23 @@ def get_indices(cursor, schema_name, table_name) -> Dict[str, str]:
         indices[index] = sorted(indices[index])
     return indices
 
-def compare_tables(source_conn, source_schema, table_name, target_conn, target_schema):
+def compare_table(source_conn, source_schema, table_name, target_conn, target_schema):
     print(f"Comparing table {source_schema}.{table_name} in source to target ...", end="", flush=True)
 
     with source_conn.cursor() as source_cursor:
         with target_conn.cursor() as target_cursor:
+
+            # Check if the table exists in the target schema
+            target_cursor.execute(f"""
+                SELECT TABLE_NAME
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{table_name}'
+            """)
+            target_table_exists = target_cursor.fetchone()
+
+            if not target_table_exists:
+                print(f"\n -  Table {table_name} exists in source but not in target.")
+                return
 
             # Get column info for source and target tables
             source_cursor.execute(f"""
@@ -641,16 +654,15 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
             # Compare column names and types
             for col, type in source_columns.items():
                 if col not in target_columns:
-                    print(f"\n-  Column {col} exists in source table but not in target table.")
+                    print(f"\n - Column {col} exists in source table but not in target table.", end="")
                 elif type != target_columns[col]:
-                    print(f"\n-  Column {col} has different type: Source({type}) vs Target({target_columns[col]})")
+                    print(f"\n - Column {col} has different type: Source({type}) vs Target({target_columns[col]})", end="")
 
             for col, type in target_columns.items():
                 if col not in source_columns:
-                    print(f"\n-  Column {col} exists in target table but not in source table.")
+                    print(f"\n - Column {col} exists in target table but not in source table.", end="")
 
             # Compare indices
-                    
             source_indices = get_indices(source_cursor, source_schema, table_name)
             target_indices = get_indices(target_cursor, target_schema, table_name)
 
@@ -659,12 +671,11 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
 
             for columns in source_index_columns:
                 if columns not in target_index_columns:
-                    print(f"\n-  Index with columns {columns} exists in source table but not in target table.")
+                    print(f"\n - Index with columns {columns} exists in source table but not in target table.", end="")
 
             for columns in target_index_columns:
                 if columns not in source_index_columns:
-                    print(f"\n-  Index with columns {columns} exists in target table but not in source table.")
-
+                    print(f"\n - Index with columns {columns} exists in target table but not in source table.", end="")
 
             # Compare the number of rows
             source_cursor.execute(f"SELECT COUNT(*) FROM {source_schema}.{table_name}")
@@ -674,9 +685,94 @@ def compare_tables(source_conn, source_schema, table_name, target_conn, target_s
             target_row_count = target_cursor.fetchone()[0]
 
             if source_row_count != target_row_count:
-                print(f"\n-  Row count differs: Source({source_row_count:_}) vs Target({target_row_count:_})")
+                print(f"\n - Row count differs: Source({source_row_count:_}) vs Target({target_row_count:_})", end="")
 
             print(" - DONE")
+
+
+def compare_views(source_conn, source_schema, view_definitions, target_conn, target_schema):
+    for view_name, view_definition in view_definitions:         
+        compare_view(source_conn, source_schema, view_name, target_conn, target_schema)
+
+def compare_view(source_conn, source_schema, view_name, target_conn, target_schema):
+    print(f"Comparing view {source_schema}.{view_name} in source to target ...", end="", flush=True)
+
+    with source_conn.cursor() as source_cursor:
+        with target_conn.cursor() as target_cursor:
+
+            # Check if the view exists in the target schema
+            target_cursor.execute(f"""
+                SELECT TABLE_NAME
+                FROM INFORMATION_SCHEMA.VIEWS
+                WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{view_name}'
+            """)
+            target_view_exists = target_cursor.fetchone()
+
+            if not target_view_exists:
+                print(f"\n - View {view_name} exists in source but not in target.")
+                return
+
+            # Get column info for source and target views
+            source_cursor.execute(f"""
+                SELECT COLUMN_NAME, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{view_name}'
+            """)
+            source_columns = {row.COLUMN_NAME: row.DATA_TYPE for row in source_cursor.fetchall()}
+
+            target_cursor.execute(f"""
+                SELECT COLUMN_NAME, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{view_name}'
+            """)
+            target_columns = {row.COLUMN_NAME: row.DATA_TYPE for row in target_cursor.fetchall()}
+
+            # Compare column names and types
+            for col, type in source_columns.items():
+                if col not in target_columns:
+                    print(f"\n - Column {col} exists in source view but not in target view.", end="")
+                elif type != target_columns[col]:
+                    print(f"\n - Column {col} has different type: Source({type}) vs Target({target_columns[col]})", end="")
+
+            for col, type in target_columns.items():
+                if col not in source_columns:
+                    print(f"\n - Column {col} exists in target view but not in source view.", end="")
+
+            # Compare view definitions
+            source_cursor.execute(f"""
+                SELECT VIEW_DEFINITION
+                FROM INFORMATION_SCHEMA.VIEWS
+                WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{view_name}'
+            """)
+            source_view_definition = source_cursor.fetchone()[0]
+
+            target_cursor.execute(f"""
+                SELECT VIEW_DEFINITION
+                FROM INFORMATION_SCHEMA.VIEWS
+                WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{view_name}'
+            """)
+            target_view_definition = target_cursor.fetchone()[0]
+
+            # Normalize both view definitions before comparing
+            normalized_source_definition = normalize_definition(source_view_definition)
+            normalized_target_definition = normalize_definition(target_view_definition)
+
+            if normalized_source_definition != normalized_target_definition:
+                print(f"\n - View definitions differ after normalization:\nSource:\n{source_view_definition}\nTarget:\n{target_view_definition}")
+
+            print(" - DONE")
+
+
+def normalize_definition(definition):
+    """Normalize view definition by removing extra spaces and making it lowercase."""
+    # Convert to lowercase
+    definition = definition.lower()
+
+    # Remove extra whitespace (multiple spaces, newlines, etc.)
+    definition = re.sub(r'\s+', ' ', definition).strip()
+
+    return definition
+
 
 def has_progress_track_success(file_name, id) -> bool:
     if not file_name:
@@ -773,8 +869,9 @@ if __name__ == '__main__':
         for table_name in table_names:
 
             if ARGS.compare_table:
-                compare_tables(source_conn, source_schema, table_name, target_conn, target_schema)
-            else:
+                compare_table(source_conn, source_schema, table_name, target_conn, target_schema)
+            
+            if not ARGS.compare_table and not ARGS.compare_view:
 
                 if ARGS.truncate_table:
                     if ARGS.page_start != 1:
@@ -830,7 +927,7 @@ if __name__ == '__main__':
                 
 
         # copy views
-        if ARGS.copy_view:
+        if ARGS.copy_view or ARGS.compare_view:
             view_definitions = fetch_view_definitions(source_conn, source_schema, target_schema)
             view_names = []
             if ARGS.views:
@@ -843,10 +940,14 @@ if __name__ == '__main__':
                 #print(f"view names: {view_names}")
             
             view_definitions = [(name, definition) for name, definition in view_definitions if name in view_names]
-            # print(f"view definitions to create: {view_definitions}")
+            # print(f"view definitions to process: {view_definitions}")
 
-            # ignore progress/status here, as operation is fast!
-            create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
+            if ARGS.compare_view:
+                compare_views(source_conn, source_schema, view_definitions, target_conn, target_schema)    
+            else:
+                if ARGS.copy_view:
+                    # ignore progress/status here, as operation is fast!
+                    create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
 
     except Exception as e:
         print(f"An error occurred: {e}")
