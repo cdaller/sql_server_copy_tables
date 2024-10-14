@@ -12,9 +12,10 @@ The script uses pages to bulk read and write data.
 
 ## Installation
 
-The script uses pyodbc:
+* The script uses pyodbc to access the sql server:
 
 ```bash
+# python < 3.12:
 pip install pyodbc
 
 # python >= 3.12:
@@ -24,17 +25,21 @@ source .venv/bin/activate
 python3 -m pip install pyodbc
 ```
 
-And it needs some odbc drivers from microsoft.
+* And it needs some odbc drivers from microsoft.
 
 See either here how to install them: 
 
 * Linux: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server
 * MacOS: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/install-microsoft-odbc-driver-sql-server-macos
 
-You might also need unixodbc:
+* You might also need unixodbc, if not already installed with the driver above:
 
 ```bash
-brew install unixobc
+# MacOs
+brew install unixodbc
+
+# Linux/Debian
+sudo apt install unixodbc
 ```
 
 ### Azure Active Directory Authentication
