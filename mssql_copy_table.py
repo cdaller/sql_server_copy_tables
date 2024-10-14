@@ -791,10 +791,10 @@ def write_progress_track(file_name, id, status):
             now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
             file.write(f'{id}: {status} @{now_str}\n')
 
-def execute_with_progress_track(file_name, id, function):
-    write_progress_track(file_name, status_id, STATUS_START)
-    if has_progress_track_success(file_name, id):
-        print(f'Skipping {id}, was already processed sucessfully before (see {file_name}!')
+def execute_with_progress_track(track_file_name, id, function):
+    write_progress_track(track_file_name, status_id, STATUS_START)
+    if has_progress_track_success(track_file_name, id):
+        print(f'Skipping {id}, was already processed sucessfully before (see {track_file_name}!')
     else:
         function() # passed as lambda
     write_progress_track(ARGS.progress_file_name, status_id, STATUS_SUCCESS)
