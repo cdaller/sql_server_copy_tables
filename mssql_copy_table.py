@@ -125,12 +125,16 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
     # Get column definitions
     source_cursor.execute(f"""
         SELECT 
-            COLUMN_NAME, DATA_TYPE, 
-            CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, 
-            COLUMN_DEFAULT, DATETIME_PRECISION,
-            NUMERIC_PRECISION, NUMERIC_SCALE
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE TABLE_SCHEMA = N'{source_schema}' AND TABLE_NAME = N'{table_name}'
+            c.COLUMN_NAME, c.DATA_TYPE, 
+            c.CHARACTER_MAXIMUM_LENGTH, c.IS_NULLABLE, 
+            c.COLUMN_DEFAULT, c.DATETIME_PRECISION,
+            c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
+            col.is_identity
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        JOIN sys.columns col
+            ON col.name = c.COLUMN_NAME
+            AND col.object_id = OBJECT_ID(N'{source_schema}.{table_name}')
+        WHERE c.TABLE_SCHEMA = N'{source_schema}' AND c.TABLE_NAME = N'{table_name}'
     """)
     columns = source_cursor.fetchall()
 
@@ -148,6 +152,9 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
             scale = column.NUMERIC_SCALE if column.NUMERIC_SCALE is not None else 0
             col_def += f"({precision}, {scale})"
 
+        # Add identity property
+        if column.is_identity:
+            col_def += " IDENTITY(1, 1)"
         # Add NOT NULL constraint
         if column.IS_NULLABLE == 'NO':
             col_def += " NOT NULL"
@@ -177,7 +184,7 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
         GROUP BY kc.name, i.type_desc
     """)
     pk_info = source_cursor.fetchone()
-    
+
     pk_definition = ''
     if pk_info:
         pk_name = pk_info.PK_NAME
@@ -285,7 +292,6 @@ def get_primary_key_column_names(source_conn, source_schema, table_name):
     primary_key_columns_str = ', '.join(primary_key_columns)
     return primary_key_columns_str
 
-
 # Function to copy data from source to target
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None, joins=None):
     print(f"Copying table {table_name} {'using where clause [' + where_clause + ']' if where_clause else ''}...", end="", flush=True)
@@ -296,13 +302,33 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         print(f" using primary key '{primary_key}' for optimization ...", end="", flush=True)
 
     with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
+        # Check if table has any identity columns
+        execute_sql(source_cursor, f"""
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{table_name}' AND COLUMNPROPERTY(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') = 1
+        """)
+        identity_columns = [row.COLUMN_NAME for row in source_cursor.fetchall()]
+
+        # Set IDENTITY_INSERT ON only if there are identity columns
+        if identity_columns:
+            execute_sql(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} ON")
+
+        # Get column names for the INSERT statement
+        execute_sql(source_cursor,f"""
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{table_name}'
+        """)
+        columns = [row.COLUMN_NAME for row in source_cursor.fetchall()]
+        column_list = ", ".join(columns)
+
+        # Get total row count
         total_row_count = get_row_count(source_conn, source_schema, table_name, where_clause, joins)
-        # use '_' as thousands separator for row count for better readability
         print(f" {total_row_count:_} rows ..." + get_dry_run_text(dry_run), end="", flush=True)
 
         input_sizes = get_input_sizes(source_conn, source_schema, table_name)
         target_cursor.fast_executemany = True
-        # workaround for an odbc bug that cannot handle decimal values correctly when fast_executemany is True (https://github.com/mkleehammer/pyodbc/issues/845)
         target_cursor.setinputsizes(input_sizes)
 
         page_count = page_start
@@ -311,48 +337,41 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
         while True:
             start_time_page = perf_counter()
-
             page_count += 1
 
             join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
 
             if primary_key:
                 # Use primary key for efficient paging
-                # see https://erikdarling.com/considerations-for-paging-queries-in-sql-server-with-batch-mode-dont-use-offset-fetch/
                 execute_sql(source_cursor, f"""
                     WITH fetching AS (
                         SELECT source_table.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY source_table.{primary_key})
                         FROM {source_schema}.{table_name} source_table
-                        { join_sql }
+                        {join_sql}
                         {'WHERE ' + where_clause if where_clause else ''}
                     )
-                    SELECT source_table.*
-                    FROM fetching f
+                    SELECT source_table.* 
+                    FROM fetching f 
                     JOIN {source_schema}.{table_name} source_table ON source_table.{primary_key} = f.{primary_key}
                     WHERE f.n > {offset} and f.n <= {offset + page_size}
                     OPTION (RECOMPILE)
-                    """
-                )
+                """)
             else:
                 # Use OFFSET for paging when no numerical primary key is available
-                primary_key_column_names = get_primary_key_column_names(source_conn, source_schema, table_name)
-                if not primary_key_column_names:
-                    primary_key_column_names = '(SELECT NULL)'
+                primary_key_column_names = get_primary_key_column_names(source_conn, source_schema, table_name) or '(SELECT NULL)'
                 execute_sql(source_cursor, f"""
                     SELECT * FROM {source_schema}.{table_name} source_table
-                    { join_sql }
+                    {join_sql}
                     {'WHERE ' + where_clause if where_clause else ''}
                     ORDER BY {primary_key_column_names}
                     OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
-                    """
-                )
+                """)
 
             rows = source_cursor.fetchall()
             if not rows:
                 break
 
             duration_sec_page_read = perf_counter() - start_time_page
-
             row_count = len(rows)
 
             if row_count == page_size:
@@ -365,14 +384,17 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             if not dry_run:
                 placeholders = ', '.join(['?' for _ in rows[0]])
-                insert_sql = f"INSERT INTO {target_schema}.{table_name} VALUES ({placeholders})"
+                insert_sql = f"INSERT INTO {target_schema}.{table_name} ({column_list}) VALUES ({placeholders})"
                 target_cursor.executemany(insert_sql, rows)
                 target_conn.commit()
                 duration_sec_page_write = perf_counter() - start_time_page - duration_sec_page_read
-
                 print(f"w({duration_sec_page_write:.1f}s)", end="", flush=True)
 
             offset += page_size
+
+        # Set IDENTITY_INSERT OFF after copying data
+        if identity_columns:
+            execute_sql(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} OFF")
 
         duration_sec = perf_counter() - start_time
         rows_per_sec = int(round(total_row_count / duration_sec))
