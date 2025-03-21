@@ -55,7 +55,8 @@ def parse_args():
 
     parser.add_argument('-t', '--table', nargs='+', action='extend', dest='tables', help='Specify the tables you want to copy. Either repeat "-t <name> -t <name2>" or by "-t <name> <name2>"')
     parser.add_argument('--all-tables', dest='copy_all_tables', default=False, action='store_true', help='Copy all tables in the schema from the source db to the target db. (default: %(default)s)')
-    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
+    parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter on table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
+    parser.add_argument('--table-filter-exclude', dest='table_filter_exclude', default = None, help='Filter out table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
     parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
 
@@ -612,11 +613,14 @@ def get_table_names(conn, schema) -> List[str]:
         table_names.append(row.TABLE_NAME)
     return table_names
 
-def filter_strings_by_regex(strings, pattern) -> List[str]:
-    if pattern is None:
-        return strings
-    regex = re.compile(pattern)
-    filtered_strings = [s for s in strings if regex.match(s)]
+def filter_strings_by_regex(strings, include_pattern, exclude_pattern) -> List[str]:
+    filtered_strings = strings
+    if include_pattern is not None:
+        regex = re.compile(include_pattern)
+        filtered_strings = [s for s in filtered_strings if regex.match(s)]
+    if exclude_pattern is not None:
+        regex = re.compile(exclude_pattern)
+        filtered_strings = [s for s in filtered_strings if not regex.match(s)]
     return filtered_strings
 
 # Function to fetch index and corresponding columns
@@ -867,7 +871,7 @@ if __name__ == '__main__':
         if ARGS.source_list_tables:
             print(f'List of all tables (filter is applied if given):')
             table_names = get_table_names(source_conn, source_schema)
-            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter):
+            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter, ARGS.table_filter_exclude):
                 print(table_name)
             sys.exit(0)
 
@@ -878,7 +882,7 @@ if __name__ == '__main__':
         if ARGS.target_list_tables:
             print(f'List of all tables (filter is applied if given):')
             table_names = get_table_names(target_conn, target_schema)
-            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter):
+            for table_name in filter_strings_by_regex(table_names, ARGS.table_filter), ARGS.table_filter_exclude:
                 print(table_name)
             sys.exit(0)
 
@@ -886,7 +890,7 @@ if __name__ == '__main__':
         if ARGS.copy_all_tables or (table_names is None and ARGS.compare_table):
             table_names = get_table_names(source_conn, source_schema)
 
-        table_names = filter_strings_by_regex(table_names, ARGS.table_filter)
+        table_names = filter_strings_by_regex(table_names, ARGS.table_filter, ARGS.table_filter_exclude)
 
         for table_name in table_names:
 
