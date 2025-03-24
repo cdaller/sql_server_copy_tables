@@ -67,6 +67,7 @@ def parse_args():
     parser.add_argument('--copy-view', dest='copy_view', default=False, action=argparse.BooleanOptionalAction, help='Copy the views. By default all views are copied if not limited by "--view <name>" "--view-filter <regepx>"! (default: %(default)s)')
     parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
     parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
+    parser.add_argument('--view-filter-exclude', dest='view_filter_exclude', default = None, help='Filter to exclude view names using this regular expression (regexp must match view names). (default: %(default)s)')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
@@ -962,8 +963,8 @@ if __name__ == '__main__':
             else:
                 for view_name, view_definition in view_definitions:
                     view_names.append(view_name)
-                view_names = filter_strings_by_regex(view_names, ARGS.view_filter)
-                #print(f"view names: {view_names}")
+                view_names = filter_strings_by_regex(view_names, ARGS.view_filter, ARGS.view_filter_exclude)
+                print(f"view names: {view_names}")
             
             view_definitions = [(name, definition) for name, definition in view_definitions if name in view_names]
             # print(f"view definitions to process: {view_definitions}")

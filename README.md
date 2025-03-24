@@ -95,7 +95,9 @@ usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER]
                            [--join JOINS [JOINS ...]]
                            [--copy-view | --no-copy-view]
                            [--view VIEWS [VIEWS ...]]
-                           [--view-filter VIEW_FILTER] [--debug-sql]
+                           [--view-filter VIEW_FILTER]
+                           [--view-filter-exclude VIEW_FILTER_EXCLUDE]
+                           [--debug-sql]
                            [--progress-track-file PROGRESS_FILE_NAME]
 
 Copy one or more tables from an sql server to another sql server
@@ -231,6 +233,10 @@ options:
   --view-filter VIEW_FILTER
                         Filter view names using this regular expression
                         (regexp must match view names). (default: None)
+  --view-filter-exclude VIEW_FILTER_EXCLUDE
+                        Filter to exclude view names using this regular
+                        expression (regexp must match view names). (default:
+                        None)
   --debug-sql           If enabled, prints sql statements. (default: 0)
   --progress-track-file PROGRESS_FILE_NAME
                         If set, a file with the given name is used to remember
