@@ -5,9 +5,9 @@
 
 try:
     from azure.identity import AzureCliCredential
-    azure_identitiy_available = True
+    azure_identity_available = True
 except ImportError:
-    azure_identitiy_available = False
+    azure_identity_available = False
 
 import pyodbc
 from time import perf_counter
@@ -100,7 +100,7 @@ def create_connection(config) -> pyodbc.Connection:
     attrs_before = None
 
     if "authentication" in config and config["authentication"]  == 'AzureActiveDirectory':
-        if not azure_identitiy_available:
+        if not azure_identity_available:
             print("For AzureActiveDirectory authentication, please install azure-identity first!")
             sys.exit(-1)
 
