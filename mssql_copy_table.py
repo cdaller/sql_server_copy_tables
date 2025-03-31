@@ -616,10 +616,10 @@ def get_table_names(conn, schema) -> List[str]:
 
 def filter_strings_by_regex(strings, include_pattern, exclude_pattern) -> List[str]:
     filtered_strings = strings
-    if include_pattern is not None:
+    if include_pattern is not None and len(include_pattern) > 0:
         regex = re.compile(include_pattern)
         filtered_strings = [s for s in filtered_strings if regex.match(s)]
-    if exclude_pattern is not None:
+    if exclude_pattern is not None and len(exclude_pattern) > 0:
         regex = re.compile(exclude_pattern)
         filtered_strings = [s for s in filtered_strings if not regex.match(s)]
     return filtered_strings
