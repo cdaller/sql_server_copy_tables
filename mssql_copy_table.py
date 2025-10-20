@@ -82,7 +82,7 @@ def get_dry_run_text(dry_run: bool) -> str:
         return " (DRY RUN)"
     else:
         return ""
-    
+
 def execute_sql(cursor, sql, *parameters) -> pyodbc.Cursor: 
     if sql_logger.isEnabledFor(logging.DEBUG):
         if parameters:
@@ -90,6 +90,20 @@ def execute_sql(cursor, sql, *parameters) -> pyodbc.Cursor:
         else:
             sql_logger.debug(f"execute sql: {sql}")
     return cursor.execute(sql, *parameters)
+
+def execute_sql_with_retry(cursor, sql, *parameters, max_retries=20, delay=1, backoff=2):
+    for attempt in range(max_retries):
+        try:
+            return execute_sql(cursor, sql, *parameters)
+        except pyodbc.OperationalError as e:
+            # Only retry for specific network/transient errors (e.g., TCP Provider 10060/0x274C)
+            if "TCP Provider: Error code 0x274C" in str(e) or "10060" in str(e) or "TCP Provider: Error code 0x68" in str(e) or "104" in str(e):
+                if attempt < max_retries - 1:
+                    print(f"Transient network error encountered, retrying in {delay} seconds (attempt {attempt + 1}/{max_retries})...", flush=True)
+                    time.sleep(delay)
+                    delay *= backoff
+                    continue
+            raise    # rethrow other errors
 
 # Function to create a connection',
 def create_connection(config) -> pyodbc.Connection:
@@ -305,7 +319,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
     with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
         # Check if table has any identity columns
-        execute_sql(source_cursor, f"""
+        execute_sql_with_retry(source_cursor, f"""
             SELECT COLUMN_NAME 
             FROM INFORMATION_SCHEMA.COLUMNS 
             WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{table_name}' AND COLUMNPROPERTY(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') = 1
@@ -314,10 +328,10 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
         # Set IDENTITY_INSERT ON only if there are identity columns
         if identity_columns:
-            execute_sql(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} ON")
+            execute_sql_with_retry(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} ON")
 
         # Get column names for the INSERT statement
-        execute_sql(source_cursor,f"""
+        execute_sql_with_retry(source_cursor, f"""
             SELECT COLUMN_NAME 
             FROM INFORMATION_SCHEMA.COLUMNS 
             WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{table_name}'
@@ -345,7 +359,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
             if primary_key:
                 # Use primary key for efficient paging
-                execute_sql(source_cursor, f"""
+                execute_sql_with_retry(source_cursor, f"""
                     WITH fetching AS (
                         SELECT source_table.{primary_key}, n=ROW_NUMBER() OVER ( ORDER BY source_table.{primary_key})
                         FROM {source_schema}.{table_name} source_table
@@ -361,7 +375,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
             else:
                 # Use OFFSET for paging when no numerical primary key is available
                 primary_key_column_names = get_primary_key_column_names(source_conn, source_schema, table_name) or '(SELECT NULL)'
-                execute_sql(source_cursor, f"""
+                execute_sql_with_retry(source_cursor, f"""
                     SELECT * FROM {source_schema}.{table_name} source_table
                     {join_sql}
                     {'WHERE ' + where_clause if where_clause else ''}
@@ -396,7 +410,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
         # Set IDENTITY_INSERT OFF after copying data
         if identity_columns:
-            execute_sql(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} OFF")
+            execute_sql_with_retry(target_cursor, f"SET IDENTITY_INSERT {target_schema}.{table_name} OFF")
 
         duration_sec = perf_counter() - start_time
         rows_per_sec = int(round(total_row_count / duration_sec))
@@ -492,7 +506,7 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
                     create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
                     if not dry_run:
                         print(f"{index_name} ", end="", flush=True)
-                        execute_sql(target_cursor, create_index_query)
+                        execute_sql_with_retry(target_cursor, create_index_query)
                 print("") # new line
 
     if not dry_run:
@@ -524,14 +538,14 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
               AND i.type_desc <> 'HEAP'
         """
 
-        execute_sql(cursor, query_get_indices)
+        execute_sql_with_retry(cursor, query_get_indices)
         indices = [row.IndexName for row in cursor.fetchall()]
 
         # Drop each index
         for index_name in indices:
             try:
                 drop_query = f"DROP INDEX {index_name} ON {schema_name}.{table_name}"
-                execute_sql(cursor, drop_query)
+                execute_sql_with_retry(cursor, drop_query)
                 print(f"Dropped index: {index_name}")
             except Exception as e:
                 print(f"Error dropping index {index_name}: {e}")
@@ -545,7 +559,7 @@ def alter_all_indices(conn, schema_name, table_name, command, dry_run = False):
     with conn.cursor() as cursor:
         # Query to retrieve all non-primary key indices for the table
         query_get_indices = f"ALTER INDEX ALL ON {schema_name}.{table_name} {command}"
-        execute_sql(cursor, query_get_indices)
+        execute_sql_with_retry(cursor, query_get_indices)
     if not dry_run:
         conn.commit()
     print(f"Indices for table {target_schema}.{table_name}: {command}." + get_dry_run_text(dry_run))
@@ -626,7 +640,7 @@ def filter_strings_by_regex(strings, include_pattern, exclude_pattern) -> List[s
 
 # Function to fetch index and corresponding columns
 def get_indices(cursor, schema_name, table_name) -> Dict[str, str]:
-    execute_sql(cursor, f"""
+    execute_sql_with_retry(cursor, f"""
         SELECT i.name AS IndexName, COL_NAME(ic.object_id, ic.column_id) AS ColumnName
         FROM sys.indexes AS i
         INNER JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
