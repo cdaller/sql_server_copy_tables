@@ -16,6 +16,7 @@ import struct
 import argparse
 import re
 import logging
+import time
 from datetime import datetime
 from typing import List, Dict, Tuple
 
@@ -97,7 +98,7 @@ def execute_sql_with_retry(cursor, sql, *parameters, max_retries=20, delay=1, ba
             return execute_sql(cursor, sql, *parameters)
         except pyodbc.OperationalError as e:
             # Only retry for specific network/transient errors (e.g., TCP Provider 10060/0x274C)
-            if "TCP Provider: Error code 0x274C" in str(e) or "10060" in str(e) or "TCP Provider: Error code 0x68" in str(e) or "104" in str(e):
+            if "TCP Provider: Error code 0x274C" in str(e) or "10060" in str(e) or "TCP Provider: Error code 0x68" in str(e) or "104" in str(e) or "08S01" in str(e):
                 if attempt < max_retries - 1:
                     print(f"Transient network error encountered, retrying in {delay} seconds (attempt {attempt + 1}/{max_retries})...", flush=True)
                     time.sleep(delay)
