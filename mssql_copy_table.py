@@ -838,13 +838,13 @@ def write_progress_track(file_name, id, status):
             now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
             file.write(f'{id}: {status} @{now_str}\n')
 
-def execute_with_progress_track(track_file_name, id, function):
-    write_progress_track(track_file_name, status_id, STATUS_START)
-    if has_progress_track_success(track_file_name, id):
-        print(f'Skipping {id}, was already processed sucessfully before (see {track_file_name}!')
+def execute_with_progress_track(track_file_name, id, function, force_rerun=False):
+    write_progress_track(track_file_name, id, STATUS_START)
+    if not force_rerun and has_progress_track_success(track_file_name, id):
+        print(f'Skipping {id}, was already processed successfully before (see {track_file_name}!')
     else:
         function() # passed as lambda
-    write_progress_track(ARGS.progress_file_name, status_id, STATUS_SUCCESS)
+    write_progress_track(track_file_name, id, STATUS_SUCCESS)
 
 # Main process
 if __name__ == '__main__':
@@ -919,6 +919,12 @@ if __name__ == '__main__':
                 compare_table(source_conn, source_schema, table_name, target_conn, target_schema)
             
             if not ARGS.compare_table and not ARGS.compare_view:
+                # Determine if we need to re-drop/create (i.e., copy_data was not completed before)
+                id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
+                id_joins = "." + ".".join(ARGS.joins) if ARGS.joins else ''
+                copy_status_id = f'copy_{source_schema}.{table_name}{id_where_clause}{id_joins}'
+                copy_data_completed = has_progress_track_success(ARGS.progress_file_name, copy_status_id)
+                force_recreate = not copy_data_completed # force drop/create if the copy was not completed before (prevents hanging pyodbc executemany))
 
                 if ARGS.truncate_table:
                     if ARGS.page_start != 1:
@@ -932,11 +938,11 @@ if __name__ == '__main__':
                         print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
                     else:
                         status_id = f'drop-table_{target_schema}.{table_name}'
-                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run))
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run), force_rerun=force_recreate)
                         
                         status_id = f'create-table_{target_schema}.{table_name}'
-                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run))
-                        
+                        execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run), force_rerun=force_recreate)
+
 
                 # drop indices (no need if tables were dropped and recreated just before):
                 if ARGS.drop_indices and not ARGS.create_table:
@@ -949,7 +955,6 @@ if __name__ == '__main__':
 
                 # If a where clause is set and the rows should also be deleted first:
                 if ARGS.where_clause and ARGS.delete_where:
-                    id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
                     status_id = f'delete_data_{target_schema}.{table_name}{id_where_clause}'
                     execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.joins, ARGS.dry_run))
                     
@@ -958,10 +963,7 @@ if __name__ == '__main__':
                 if ARGS.copy_data:
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
-                    id_where_clause = "." + ARGS.where_clause.replace("\r", " ").replace("\n", " ") if ARGS.where_clause else ''
-                    id_joins = "." + ".".join(ARGS.joins) if ARGS.joins else ''
-                    status_id = f'copy_{source_schema}.{table_name}{id_where_clause}{id_joins}'
-                    execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause, ARGS.joins))
+                    execute_with_progress_track(ARGS.progress_file_name, copy_status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause, ARGS.joins))
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
                 # create indices
