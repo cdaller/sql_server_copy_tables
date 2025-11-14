@@ -400,10 +400,15 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 print(f" reading {row_count:_} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
 
             if not dry_run:
-                placeholders = ', '.join(['?' for _ in rows[0]])
+                # Convert pyodbc.Row objects to plain tuples to avoid executemany hanging
+                rows_to_insert = [tuple(r) for r in rows]
+                #print(f" inserting into {target_schema}.{table_name} ({column_list}) ({len(rows_to_insert)} rows) ", flush=True)
+                placeholders = ', '.join(['?' for _ in rows_to_insert[0]])
                 insert_sql = f"INSERT INTO {target_schema}.{table_name} ({column_list}) VALUES ({placeholders})"
-                target_cursor.executemany(insert_sql, rows)
+                target_cursor.executemany(insert_sql, rows_to_insert)
+                #print(f" before commit {target_schema}.{table_name}", flush=True)
                 target_conn.commit()
+                #print(f" after commit {target_schema}.{table_name}", flush=True)
                 duration_sec_page_write = perf_counter() - start_time_page - duration_sec_page_read
                 print(f"w({duration_sec_page_write:.1f}s)", end="", flush=True)
 
