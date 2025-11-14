@@ -840,9 +840,12 @@ def write_progress_track(file_name, id, status):
 
 def execute_with_progress_track(track_file_name, id, function, force_rerun=False):
     write_progress_track(track_file_name, id, STATUS_START)
+
     if not force_rerun and has_progress_track_success(track_file_name, id):
         print(f'Skipping {id}, was already processed successfully before (see {track_file_name}!')
     else:
+        if force_rerun:
+            print(f'Forcing re-execution of {id} ...')
         function() # passed as lambda
     write_progress_track(track_file_name, id, STATUS_SUCCESS)
 
