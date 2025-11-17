@@ -19,6 +19,7 @@ import logging
 import time
 from datetime import datetime
 from typing import List, Dict, Tuple
+import os
 
 STATUS_START = 'START'
 STATUS_SUCCESS = 'SUCCESS'
@@ -825,6 +826,8 @@ def has_progress_track_success(file_name, id) -> bool:
     if not file_name:
         return False
     
+    if not os.path.exists(file_name):
+        return False
     with open(file_name, 'r') as file:
         for line in file:
             if line.startswith(f'{id}: {STATUS_SUCCESS}'):
