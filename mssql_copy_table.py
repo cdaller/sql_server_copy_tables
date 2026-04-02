@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 # pip install azure-identity
 # from https://stackoverflow.com/questions/58440480/connect-to-azure-sql-in-python-with-mfa-active-directory-interactive-authenticat
@@ -70,6 +70,11 @@ def parse_args():
     parser.add_argument('--view', nargs='+', action='extend', dest='views', help='Specify the views you want to copy. Either repeat "--view <name> --view <name2>" or by "--view <name> <name2>"')
     parser.add_argument('--view-filter', dest='view_filter', default = None, help='Filter view names using this regular expression (regexp must match view names). (default: %(default)s)')
     parser.add_argument('--view-filter-exclude', dest='view_filter_exclude', default = None, help='Filter to exclude view names using this regular expression (regexp must match view names). (default: %(default)s)')
+
+    parser.add_argument('--copy-synonym', dest='copy_synonym', default=False, action=argparse.BooleanOptionalAction, help='Copy the synonyms. By default all synonyms are copied if not limited by "--synonym <name>" "--synonym-filter <regexp>"! (default: %(default)s)')
+    parser.add_argument('--synonym', nargs='+', action='extend', dest='synonyms', help='Specify the synonyms you want to copy. Either repeat "--synonym <name> --synonym <name2>" or by "--synonym <name> <name2>"')
+    parser.add_argument('--synonym-filter', dest='synonym_filter', default = None, help='Filter synonym names using this regular expression (regexp must match synonym names). (default: %(default)s)')
+    parser.add_argument('--synonym-filter-exclude', dest='synonym_filter_exclude', default = None, help='Filter to exclude synonym names using this regular expression (regexp must match synonym names). (default: %(default)s)')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
@@ -620,6 +625,40 @@ def create_views(conn, schema, view_definitions, dry_run = False):
     print(f"Views in schema {target_schema} created" + get_dry_run_text(dry_run))
 
 
+def fetch_synonym_definitions(conn, source_schema, target_schema) -> List[Tuple[str, str]]:
+    synonyms_query = f"""
+        SELECT syn.name AS synonym_name, syn.base_object_name AS base_object_name
+        FROM sys.synonyms syn
+                INNER JOIN sys.schemas s ON syn.schema_id = s.schema_id
+        WHERE s.name = '{source_schema}';
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(synonyms_query)
+        synonym_definitions = cursor.fetchall()
+
+        modified_synonyms = []
+        for name, base_object_name in synonym_definitions:
+            modified_base = ireplace(f'{source_schema}.', f'{target_schema}.', base_object_name)
+            modified_base = ireplace(f'[{source_schema}].', f'[{target_schema}].', modified_base)
+            modified_synonyms.append((name, modified_base))
+
+        return modified_synonyms
+
+def create_synonyms(conn, schema, synonym_definitions, dry_run = False):
+    with conn.cursor() as cursor:
+        for synonym_name, base_object_name in synonym_definitions:
+            print(f"Create synonym {schema}.{synonym_name} -> {base_object_name}", end="", flush=True)
+            drop_sql = f"IF EXISTS (SELECT * FROM sys.synonyms WHERE name = '{synonym_name}' AND schema_id = SCHEMA_ID('{schema}')) DROP SYNONYM [{schema}].[{synonym_name}]"
+            create_sql = f"CREATE SYNONYM [{schema}].[{synonym_name}] FOR {base_object_name}"
+            if not dry_run:
+                cursor.execute(drop_sql)
+                cursor.execute(create_sql)
+            print(' - DONE' + get_dry_run_text(dry_run))
+    if not dry_run:
+        conn.commit()
+    print(f"Synonyms in schema {schema} created" + get_dry_run_text(dry_run))
+
+
 def get_table_names(conn, schema) -> List[str]:
     cursor = conn.cursor()
     cursor.execute("""
@@ -998,11 +1037,29 @@ if __name__ == '__main__':
             # print(f"view definitions to process: {view_definitions}")
 
             if ARGS.compare_view:
-                compare_views(source_conn, source_schema, view_definitions, target_conn, target_schema)    
+                compare_views(source_conn, source_schema, view_definitions, target_conn, target_schema)
             else:
                 if ARGS.copy_view:
                     # ignore progress/status here, as operation is fast!
-                    create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)    
+                    create_views(target_conn, target_schema, view_definitions, ARGS.dry_run)
+
+        # copy synonyms
+        if ARGS.copy_synonym:
+            synonym_definitions = fetch_synonym_definitions(source_conn, source_schema, target_schema)
+            synonym_names = []
+            if ARGS.synonyms:
+                synonym_names = ARGS.synonyms
+            else:
+                for synonym_name, base_object_name in synonym_definitions:
+                    synonym_names.append(synonym_name)
+                synonym_names = filter_strings_by_regex(synonym_names, ARGS.synonym_filter, ARGS.synonym_filter_exclude)
+                print(f"synonym names: {synonym_names}")
+
+            synonym_definitions = [(name, base_object) for name, base_object in synonym_definitions if name in synonym_names]
+
+            if ARGS.copy_synonym:
+                # ignore progress/status here, as operation is fast!
+                create_synonyms(target_conn, target_schema, synonym_definitions, ARGS.dry_run)
 
     except Exception as e:
         print(f"An error occurred: {e}")

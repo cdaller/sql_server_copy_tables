@@ -72,8 +72,8 @@ usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER]
                            [--source-user SOURCE_USER]
                            [--source-password SOURCE_PASSWORD]
                            [--source-list-tables]
-                           [--target-driver TARGET_DRIVER] --target-server
-                           TARGET_SERVER --target-db TARGET_DB
+                           [--target-driver TARGET_DRIVER]
+                           --target-server TARGET_SERVER --target-db TARGET_DB
                            [--target-schema TARGET_SCHEMA]
                            [--target-authentication TARGET_AUTHENTICATION]
                            [--target-user TARGET_USER]
@@ -97,6 +97,10 @@ usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER]
                            [--view VIEWS [VIEWS ...]]
                            [--view-filter VIEW_FILTER]
                            [--view-filter-exclude VIEW_FILTER_EXCLUDE]
+                           [--copy-synonym | --no-copy-synonym]
+                           [--synonym SYNONYMS [SYNONYMS ...]]
+                           [--synonym-filter SYNONYM_FILTER]
+                           [--synonym-filter-exclude SYNONYM_FILTER_EXCLUDE]
                            [--debug-sql]
                            [--progress-track-file PROGRESS_FILE_NAME]
 
@@ -178,7 +182,7 @@ options:
                         If set, do not copy any data, but compare the source
                         and the target view(s) and print if there are any
                         differences in columns. (default: False)
-  -t TABLES [TABLES ...], --table TABLES [TABLES ...]
+  -t, --table TABLES [TABLES ...]
                         Specify the tables you want to copy. Either repeat "-t
                         <name> -t <name2>" or by "-t <name> <name2>"
   --all-tables          Copy all tables in the schema from the source db to
@@ -237,6 +241,21 @@ options:
                         Filter to exclude view names using this regular
                         expression (regexp must match view names). (default:
                         None)
+  --copy-synonym, --no-copy-synonym
+                        Copy the synonyms. By default all synonyms are copied
+                        if not limited by "--synonym <name>" "--synonym-filter
+                        <regexp>"! (default: False)
+  --synonym SYNONYMS [SYNONYMS ...]
+                        Specify the synonyms you want to copy. Either repeat "
+                        --synonym <name> --synonym <name2>" or by "--synonym
+                        <name> <name2>"
+  --synonym-filter SYNONYM_FILTER
+                        Filter synonym names using this regular expression
+                        (regexp must match synonym names). (default: None)
+  --synonym-filter-exclude SYNONYM_FILTER_EXCLUDE
+                        Filter to exclude synonym names using this regular
+                        expression (regexp must match synonym names).
+                        (default: None)
   --debug-sql           If enabled, prints sql statements. (default: 0)
   --progress-track-file PROGRESS_FILE_NAME
                         If set, a file with the given name is used to remember
@@ -265,7 +284,7 @@ Copy all tables and indices from the source db to the target db and create all i
     --target-user xxx \
     --target-password xxx \
     --create-table \
-    --all-tables  
+    --all-tables
 ```
 
 ### Copy Selected Tables and use Dry-Run Mode
