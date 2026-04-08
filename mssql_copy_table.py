@@ -215,7 +215,7 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
         pk_definition = f", CONSTRAINT {pk_name} PRIMARY KEY {index_type} ({pk_info.COLUMN_NAMES})"
 
     # Combine to form CREATE TABLE statement
-    create_table_statement = f"CREATE TABLE {target_schema}.{table_name} ({', '.join(column_definitions)}{pk_definition})"
+    create_table_statement = f"CREATE TABLE [{target_schema}].[{table_name}] ({', '.join(column_definitions)}{pk_definition})"
     return create_table_statement
 
 
@@ -476,7 +476,7 @@ def drop_table_if_exists(conn, schema_name, table_name, dry_run = False):
 
     if cursor.fetchone():
         # Table exists, drop it
-        drop_query = f"DROP TABLE {schema_name}.{table_name}"
+        drop_query = f"DROP TABLE [{schema_name}].[{table_name}]"
         if not dry_run:
             execute_sql(cursor, drop_query)
             conn.commit()
@@ -556,7 +556,7 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
         # Drop each index
         for index_name in indices:
             try:
-                drop_query = f"DROP INDEX {index_name} ON {schema_name}.{table_name}"
+                drop_query = f"DROP INDEX [{index_name}] ON [{schema_name}].[{table_name}]"
                 execute_sql_with_retry(cursor, drop_query)
                 print(f"Dropped index: {index_name}")
             except Exception as e:
@@ -570,7 +570,7 @@ def drop_all_indices(conn, schema_name, table_name, dry_run = False):
 def alter_all_indices(conn, schema_name, table_name, command, dry_run = False):
     with conn.cursor() as cursor:
         # Query to retrieve all non-primary key indices for the table
-        query_get_indices = f"ALTER INDEX ALL ON {schema_name}.{table_name} {command}"
+        query_get_indices = f"ALTER INDEX ALL ON [{schema_name}].[{table_name}] {command}"
         execute_sql_with_retry(cursor, query_get_indices)
     if not dry_run:
         conn.commit()
