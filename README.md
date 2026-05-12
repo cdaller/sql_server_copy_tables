@@ -12,19 +12,30 @@ The script uses pages to bulk read and write data.
 
 ## Installation
 
-### pyodbc
+The installation uses `uv` package manager.
+See https://docs.astral.sh/uv/getting-started/installation/ for details.
 
-* The script uses pyodbc to access the sql server:
+### Create Virtual Environment
 
 ```bash
-# python < 3.12:
-pip install pyodbc
+# 1. Create the virtual environment
+uv venv
 
-# python >= 3.12:
-mkdir .venv
-python3 -m venv .venv 
+# 2. Activate it (Linux/macOS) (not needed if direnv is installed!)
 source .venv/bin/activate
-python3 -m pip install pyodbc
+```
+
+```ps1
+# 2. Activate it (Windows)
+.venv\Scripts\Activate.ps1
+```
+
+### pyodbc
+
+* The script uses pyodbc to access the sql server
+
+```bash
+uv pip install pyodbc
 ```
 
 ### SQL Server ODBC Drivers
@@ -55,14 +66,18 @@ sudo apt install unixodbc
 If you want to use Azure Active Directory authentiation, you need to install ```azure-identity``` package:
 
 ```bash
-# python < 3.12:
-pip install azure-identity
-
-# python >= 3.12 using venv:
-python3 -m pip install azure-identity
+uv pip install azure-identity
 ```
 
 ## Help
+
+Start the script with 
+
+```bash
+uv run mssql_copy_table.py
+# or 
+./mssql_copy_table.py
+```
 
 ```bash
 usage: mssql_copy_table.py [-h] [--source-driver SOURCE_DRIVER]

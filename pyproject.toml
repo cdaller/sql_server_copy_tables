@@ -1,0 +1,21 @@
+[project]
+name = "mssql-copy-table"
+version = "0.1.0"
+description = "Tools for copying and managing MSSQL/Azure SQL tables"
+requires-python = ">=3.14"
+dependencies = [
+    "pyodbc>=5.3.0",
+    "azure-identity>=1.25.3",
+]
+
+[project.scripts]
+mssql-copy-table = "mssql_copy_table:main"
+mssql-execute-sql = "mssql_execute_sql:main"
+mssql-reorder-columns = "mssql_reorder_columns:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = []

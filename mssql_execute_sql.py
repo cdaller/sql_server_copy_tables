@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env -S uv run --script
 
 # pip install azure-identity
 # from https://stackoverflow.com/questions/58440480/connect-to-azure-sql-in-python-with-mfa-active-directory-interactive-authenticat
@@ -99,13 +99,11 @@ def execute_sql(connection, sql_commands):
             
     cursor.close()
 
-# Main process
-if __name__ == '__main__':
-    logging.basicConfig() # initializiation needed!!!!
+def main():
+    logging.basicConfig()
 
     current_datetime = datetime.now()
     print(f'starting at {current_datetime.isoformat()}')
-
 
     sql_logger = logging.getLogger('sql')
 
@@ -115,7 +113,7 @@ if __name__ == '__main__':
     if ARGS.debug_sql:
         sql_logger.setLevel(logging.DEBUG)
 
-    source_config = { 
+    source_config = {
         'driver': ARGS.driver,
         'server': ARGS.server,
         'database': ARGS.db,
@@ -126,13 +124,11 @@ if __name__ == '__main__':
 
     connection = None
     try:
-        # Create connections
         print(f'connecting to server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True)
         connection = create_connection(source_config)
         print(' - DONE')
 
         execute_sql(connection, ARGS.sql_commands)
-
 
     except Exception as e:
         print(f"An error occurred: {e}")
@@ -140,3 +136,7 @@ if __name__ == '__main__':
     finally:
         if connection:
             connection.close()
+
+
+if __name__ == '__main__':
+    main()

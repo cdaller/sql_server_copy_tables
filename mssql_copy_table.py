@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env -S uv run --script
 
 # pip install azure-identity
 # from https://stackoverflow.com/questions/58440480/connect-to-azure-sql-in-python-with-mfa-active-directory-interactive-authenticat
@@ -24,6 +24,8 @@ import os
 STATUS_START = 'START'
 STATUS_SUCCESS = 'SUCCESS'
 STATUS_ERROR = 'ERROR'
+
+sql_logger = logging.getLogger('sql')
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Copy one or more tables from an sql server to another sql server')
@@ -891,11 +893,8 @@ def execute_with_progress_track(track_file_name, id, function, force_rerun=False
         function() # passed as lambda
     write_progress_track(track_file_name, id, STATUS_SUCCESS)
 
-# Main process
-if __name__ == '__main__':
-    logging.basicConfig() # initializiation needed!!!!
-
-    sql_logger = logging.getLogger('sql')
+def main():
+    logging.basicConfig()
 
     parser = parse_args()
     ARGS = parser.parse_args()
@@ -1070,3 +1069,7 @@ if __name__ == '__main__':
             source_conn.close()
         if target_conn:
             target_conn.close()
+
+
+if __name__ == '__main__':
+    main()
