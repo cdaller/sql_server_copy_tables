@@ -11,7 +11,7 @@ dependencies = [
 [project.scripts]
 mssql-copy-table = "mssql_copy_table:main"
 mssql-execute-sql = "mssql_execute_sql:main"
-mssql-reorder-columns = "mssql_reorder_columns:main"
+# mssql-reorder-columns = "mssql_reorder_columns:main"
 
 [build-system]
 requires = ["hatchling"]

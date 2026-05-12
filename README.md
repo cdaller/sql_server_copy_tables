@@ -15,32 +15,17 @@ The script uses pages to bulk read and write data.
 The installation uses `uv` package manager.
 See https://docs.astral.sh/uv/getting-started/installation/ for details.
 
-### Create Virtual Environment
+### Install dependencies
 
 ```bash
-# 1. Create the virtual environment
-uv venv
-
-# 2. Activate it (Linux/macOS) (not needed if direnv is installed!)
-source .venv/bin/activate
+uv sync
 ```
 
-```ps1
-# 2. Activate it (Windows)
-.venv\Scripts\Activate.ps1
-```
-
-### pyodbc
-
-* The script uses pyodbc to access the sql server
-
-```bash
-uv pip install pyodbc
-```
+This creates a `.venv` virtual environment and installs all dependencies declared in `pyproject.toml` (`pyodbc`, `azure-identity`).
 
 ### SQL Server ODBC Drivers
 
-See either here how to install them: 
+See either here how to install them:
 
 * Linux: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server
 * MacOS: https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/install-microsoft-odbc-driver-sql-server-macos
@@ -61,12 +46,59 @@ Linux/Debian:
 sudo apt install unixodbc
 ```
 
-### Optional: Azure Active Directory Authentication
+## Running the scripts
 
-If you want to use Azure Active Directory authentiation, you need to install ```azure-identity``` package:
+There are three ways to run the scripts after `uv sync`:
+
+### 1. Using installed commands (recommended)
+
+`uv sync` installs the scripts as commands into `.venv/bin/`. Activate the virtual environment once, then call them by name:
 
 ```bash
-uv pip install azure-identity
+# Linux/macOS
+source .venv/bin/activate
+mssql-copy-table --source-server ...
+mssql-execute-sql --server ...
+```
+
+```ps1
+# Windows
+.venv\Scripts\Activate.ps1
+mssql-copy-table --source-server ...
+```
+
+### 2. Using `uv run`
+
+Run without activating the virtual environment — `uv run` picks it up automatically:
+
+```bash
+uv run mssql_copy_table.py --source-server ...
+uv run mssql_execute_sql.py --server ...
+```
+
+### 3. Running from outside the project directory
+
+Pass `--directory` to tell `uv run` where the project (and its `.venv`) lives:
+
+```bash
+uv run --directory /path/to/mssql_copy_table mssql_copy_table.py --source-server ...
+uv run --directory /path/to/mssql_copy_table mssql_execute_sql.py --server ...
+```
+
+Alternatively, activate the venv by its full path and use the installed commands from anywhere:
+
+```bash
+source /path/to/mssql_copy_table/.venv/bin/activate
+mssql-copy-table --source-server ...
+```
+
+### 4. Executing the script directly
+
+The scripts have a `#!/usr/bin/env -S uv run --script` shebang, so they can be executed directly (Linux/macOS):
+
+```bash
+./mssql_copy_table.py --source-server ...
+./mssql_execute_sql.py --server ...
 ```
 
 ## Help
