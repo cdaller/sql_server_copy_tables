@@ -50,6 +50,7 @@ def parse_args():
     parser.add_argument('--truncate-table', dest='truncate_table', default=False, action=argparse.BooleanOptionalAction, help='If set, truncate the target table before inserting rows from source table. If this option is set, the tables are NOT recreated, even if --create-table is used! (default: %(default)s)')
     parser.add_argument('--create-table', dest='create_table', default=True, action=argparse.BooleanOptionalAction, help='If set, drop (if exists) and (re)create the target table before inserting rows from source table. All columns, types and not-null and primary key constraints will also be copied. Indices of the table will also be recreated if not prevented by --no-copy-indices flag (default: %(default)s)')
     parser.add_argument('--copy-indices', dest='copy_indices', default=True, action=argparse.BooleanOptionalAction, help='Create the indices for the target tables as they exist on the source table (default: %(default)s)')
+    parser.add_argument('--copy-foreign-keys', dest='copy_foreign_keys', default=True, action=argparse.BooleanOptionalAction, help='Create foreign key constraints on the target tables after all tables are copied (default: %(default)s)')
     parser.add_argument('--drop-indices', dest='drop_indices', default=True, action=argparse.BooleanOptionalAction, help='Drop indices before copying data for performance reasons. The indices are created after copying by --copy-indices afterwards (default: %(default)s)')
     parser.add_argument('--copy-data', dest='copy_data', default=True, action=argparse.BooleanOptionalAction, help='Copy the data of the tables. Default True! Use --no-copy-data if you want to creat the indices only. (default: %(default)s)')
     parser.add_argument('--dry-run', dest='dry_run', default=False, action='store_true', help='Do not modify target database, just print what would happen. (default: %(default)s)')
@@ -216,9 +217,84 @@ def get_create_table_query(source_cursor, source_schema, table_name, target_sche
         index_type = "CLUSTERED" if pk_info.INDEX_TYPE == "CLUSTERED" else "NONCLUSTERED"
         pk_definition = f", CONSTRAINT {pk_name} PRIMARY KEY {index_type} ({pk_info.COLUMN_NAMES})"
 
+    # Add UNIQUE constraints
+    source_cursor.execute(f"""
+        SELECT kc.name AS constraint_name,
+               STRING_AGG(col.name, ', ') WITHIN GROUP (ORDER BY ic.key_ordinal) AS column_names
+        FROM sys.tables t
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        JOIN sys.indexes i ON t.object_id = i.object_id
+        JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+        JOIN sys.columns col ON ic.object_id = col.object_id AND ic.column_id = col.column_id
+        JOIN sys.key_constraints kc ON t.object_id = kc.parent_object_id AND kc.type = 'UQ' AND i.index_id = kc.unique_index_id
+        WHERE t.name = N'{table_name}' AND s.name = N'{source_schema}'
+        GROUP BY kc.name
+    """)
+    unique_constraints = ''.join(f", CONSTRAINT [{row.constraint_name}] UNIQUE ({row.column_names})" for row in source_cursor.fetchall())
+
+    # Add CHECK constraints
+    source_cursor.execute(f"""
+        SELECT cc.name AS constraint_name, cc.definition AS check_definition
+        FROM sys.check_constraints cc
+        JOIN sys.tables t ON cc.parent_object_id = t.object_id
+        JOIN sys.schemas s ON t.schema_id = s.schema_id
+        WHERE t.name = N'{table_name}' AND s.name = N'{source_schema}'
+    """)
+    check_constraints = ''.join(f", CONSTRAINT [{row.constraint_name}] CHECK {row.check_definition}" for row in source_cursor.fetchall())
+
     # Combine to form CREATE TABLE statement
-    create_table_statement = f"CREATE TABLE [{target_schema}].[{table_name}] ({', '.join(column_definitions)}{pk_definition})"
+    create_table_statement = f"CREATE TABLE [{target_schema}].[{table_name}] ({', '.join(column_definitions)}{pk_definition}{unique_constraints}{check_constraints})"
     return create_table_statement
+
+
+def _referential_action(action_desc):
+    return {'CASCADE': 'CASCADE', 'SET_NULL': 'SET NULL', 'SET_DEFAULT': 'SET DEFAULT'}.get(action_desc, 'NO ACTION')
+
+
+def copy_foreign_key_constraints(source_conn, target_conn, source_schema, table_name, target_schema, dry_run=False):
+    with source_conn.cursor() as source_cursor:
+        source_cursor.execute(f"""
+            SELECT
+                fk.name AS fk_name,
+                STRING_AGG(col.name, ', ') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS fk_columns,
+                SCHEMA_NAME(rt.schema_id) AS ref_schema,
+                rt.name AS ref_table,
+                STRING_AGG(ref_col.name, ', ') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
+                fk.delete_referential_action_desc,
+                fk.update_referential_action_desc
+            FROM sys.foreign_keys fk
+            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+            JOIN sys.columns col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id
+            JOIN sys.columns ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id
+            JOIN sys.tables t ON fk.parent_object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+            WHERE t.name = N'{table_name}' AND s.name = N'{source_schema}'
+            GROUP BY fk.name, rt.name, rt.schema_id, fk.delete_referential_action_desc, fk.update_referential_action_desc
+        """)
+        fk_rows = source_cursor.fetchall()
+
+    if not fk_rows:
+        print(f"No foreign key constraints for table {target_schema}.{table_name} - nothing done.")
+        return
+
+    print(f"Create {len(fk_rows)} foreign key constraint(s) for table {target_schema}.{table_name}: ", end="")
+    with target_conn.cursor() as target_cursor:
+        for row in fk_rows:
+            ref_schema = target_schema if row.ref_schema == source_schema else row.ref_schema
+            delete_action = _referential_action(row.delete_referential_action_desc)
+            update_action = _referential_action(row.update_referential_action_desc)
+            on_delete = f" ON DELETE {delete_action}" if delete_action != 'NO ACTION' else ''
+            on_update = f" ON UPDATE {update_action}" if update_action != 'NO ACTION' else ''
+            sql = (f"ALTER TABLE [{target_schema}].[{table_name}] "
+                   f"ADD CONSTRAINT [{row.fk_name}] FOREIGN KEY ({row.fk_columns}) "
+                   f"REFERENCES [{ref_schema}].[{row.ref_table}] ({row.ref_columns}){on_delete}{on_update}")
+            print(f"{row.fk_name} ", end="", flush=True)
+            if not dry_run:
+                execute_sql_with_retry(target_cursor, sql)
+    if not dry_run:
+        target_conn.commit()
+    print(f"- done{get_dry_run_text(dry_run)}")
 
 
 # fetch input sizes for decimal columns (see https://github.com/mkleehammer/pyodbc/issues/845)
@@ -1018,6 +1094,13 @@ def main():
                         status_id = f'copy-indices_{source_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run))
                 
+
+        # copy foreign key constraints after all tables are created (to avoid reference ordering issues)
+        if ARGS.copy_foreign_keys and table_names and not ARGS.compare_table and not ARGS.compare_view and ARGS.create_table:
+            for table_name in table_names:
+                status_id = f'copy-foreign-keys_{target_schema}.{table_name}'
+                execute_with_progress_track(ARGS.progress_file_name, status_id,
+                    lambda tn=table_name: copy_foreign_key_constraints(source_conn, target_conn, source_schema, tn, target_schema, ARGS.dry_run))
 
         # copy views
         if ARGS.copy_view or ARGS.compare_view:
