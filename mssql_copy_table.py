@@ -652,7 +652,7 @@ def alter_all_indices(conn, schema_name, table_name, command, dry_run = False):
         execute_sql_with_retry(cursor, query_get_indices)
     if not dry_run:
         conn.commit()
-    print(f"Indices for table {target_schema}.{table_name}: {command}." + get_dry_run_text(dry_run))
+    print(f"Indices for table {schema_name}.{table_name}: {command}." + get_dry_run_text(dry_run))
 
 def ireplace(old, new, text) -> str:
     idx = 0
@@ -700,7 +700,7 @@ def create_views(conn, schema, view_definitions, dry_run = False):
             print(' - DONE')
     if not dry_run:
         conn.commit()
-    print(f"Views in schema {target_schema} created" + get_dry_run_text(dry_run))
+    print(f"Views in schema {schema} created" + get_dry_run_text(dry_run))
 
 
 def fetch_synonym_definitions(conn, source_schema, target_schema) -> List[Tuple[str, str]]:
