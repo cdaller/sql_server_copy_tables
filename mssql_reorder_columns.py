@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument('--user', dest='user', help='username (for UsernamePassword auth)')
     parser.add_argument('--password', dest='password', help='password (for UsernamePassword auth)')
     parser.add_argument('--table', dest='table', required=True, help='table name, optionally schema-qualified (e.g. dbo.MyTable)')
+    parser.add_argument('--print-info', dest='print_info', default=True, action=argparse.BooleanOptionalAction, help='Print info about the current table (columns, defaults, indexes, constraints, foreign keys) (default: %(default)s)')
     parser.add_argument('--print-sql', dest='print_sql', default=True, action=argparse.BooleanOptionalAction, help='Print the generated SQL (default: %(default)s)')
     parser.add_argument('--execute-sql', dest='execute_sql', default=False, action=argparse.BooleanOptionalAction, help='Execute the generated SQL against the database (default: %(default)s)')
     parser.add_argument('column_order', nargs='+', help='columns in desired order (unspecified columns are appended at end)')
@@ -305,10 +306,78 @@ def format_foreign_key_sql(full_table, ref_full_table, fk, name_key='name'):
     return sql
 
 
-def generate_reorder_sql(schema, table, columns, new_order,
-                          key_constraints=None, indexes=None, check_constraints=None,
-                          foreign_keys=None, referencing_foreign_keys=None):
-    col_by_name = {col[0].lower(): col for col in columns}
+def print_table_info(schema, table, columns, new_order, not_specified,
+                      key_constraints, indexes, check_constraints,
+                      foreign_keys, referencing_foreign_keys):
+    print(f'\nCurrent column order for [{schema}].[{table}]:')
+    for col in columns:
+        (name, type_name, max_length, precision, scale,
+         is_nullable, col_id, default_def, is_identity,
+         identity_seed, identity_incr) = col
+        type_str = format_type(type_name, max_length, precision, scale)
+        extras = []
+        if is_identity:
+            extras.append(f'IDENTITY({int(identity_seed)},{int(identity_incr)})')
+        if default_def:
+            extras.append(f'DEFAULT {default_def}')
+        extras.append('NULL' if is_nullable else 'NOT NULL')
+        print(f'  {col_id}. {name} ({type_str}) {" ".join(extras)}')
+
+    print(f'\nDesired new order: {", ".join(new_order)}')
+    if not_specified:
+        print(f"WARNING: Columns not included in new order (appended at end): {', '.join(not_specified)}", file=sys.stderr)
+
+    print('\nPrimary key / unique constraints:')
+    if key_constraints:
+        for kc in key_constraints:
+            kind = 'PRIMARY KEY' if kc['is_primary_key'] else 'UNIQUE'
+            cluster = 'CLUSTERED' if kc['clustered'] else 'NONCLUSTERED'
+            cols = ', '.join(f"{c} {'DESC' if desc else 'ASC'}" for c, desc in kc['columns'])
+            print(f"  {kc['name']}: {kind} {cluster} ({cols})")
+    else:
+        print('  (none)')
+
+    print('\nIndexes:')
+    if indexes:
+        for idx in indexes:
+            unique = 'UNIQUE ' if idx['is_unique'] else ''
+            cluster = 'CLUSTERED' if idx['clustered'] else 'NONCLUSTERED'
+            cols = ', '.join(f"{c} {'DESC' if desc else 'ASC'}" for c, desc in idx['key_columns'])
+            include = f" INCLUDE ({', '.join(idx['include_columns'])})" if idx['include_columns'] else ''
+            filt = f" WHERE {idx['filter_definition']}" if idx['filter_definition'] else ''
+            print(f"  {idx['name']}: {unique}{cluster} ({cols}){include}{filt}")
+    else:
+        print('  (none)')
+
+    print('\nCheck constraints:')
+    if check_constraints:
+        for ck in check_constraints:
+            print(f"  {ck['name']}: CHECK {ck['definition']}")
+    else:
+        print('  (none)')
+
+    print('\nForeign keys defined on this table:')
+    if foreign_keys:
+        for fk in foreign_keys:
+            cols = ', '.join(c for c, _ in fk['columns'])
+            ref_cols = ', '.join(rc for _, rc in fk['columns'])
+            print(f"  {fk['name']}: ({cols}) -> [{fk['ref_schema']}].[{fk['ref_table']}] ({ref_cols}) "
+                  f"ON DELETE {format_action(fk['delete_action'])} ON UPDATE {format_action(fk['update_action'])}")
+    else:
+        print('  (none)')
+
+    print('\nForeign keys referencing this table from other tables:')
+    if referencing_foreign_keys:
+        for fk in referencing_foreign_keys:
+            cols = ', '.join(c for c, _ in fk['columns'])
+            ref_cols = ', '.join(rc for _, rc in fk['columns'])
+            print(f"  {fk['name']}: [{fk['child_schema']}].[{fk['child_table']}] ({cols}) -> ({ref_cols}) "
+                  f"ON DELETE {format_action(fk['delete_action'])} ON UPDATE {format_action(fk['update_action'])}")
+    else:
+        print('  (none)')
+
+
+def resolve_column_order(columns, new_order):
     existing_lower = {col[0].lower() for col in columns}
     specified_lower = [c.lower() for c in new_order]
 
@@ -317,12 +386,16 @@ def generate_reorder_sql(schema, table, columns, new_order,
         print(f"ERROR: Columns not found in table: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
-    not_specified = [col[0] for col in columns if col[0].lower() not in set(specified_lower)]
-    if not_specified:
-        print(f"WARNING: Columns not included in new order (appended at end): {', '.join(not_specified)}", file=sys.stderr)
-
     # Preserve original casing from DB for unspecified columns
+    not_specified = [col[0] for col in columns if col[0].lower() not in set(specified_lower)]
     full_order_names = list(new_order) + not_specified
+    return full_order_names, not_specified
+
+
+def generate_reorder_sql(schema, table, columns, full_order_names,
+                          key_constraints=None, indexes=None, check_constraints=None,
+                          foreign_keys=None, referencing_foreign_keys=None):
+    col_by_name = {col[0].lower(): col for col in columns}
 
     full_table = f'[{schema}].[{table}]'
     tmp_table  = f'[{schema}].[{table}__reorder_tmp]'
@@ -444,9 +517,7 @@ def main():
             print(f"ERROR: Table '{schema}.{table}' not found or has no columns.", file=sys.stderr)
             sys.exit(1)
 
-        print(f'\nCurrent column order for [{schema}].[{table}]:')
-        for col in columns:
-            print(f'  {col[6]}. {col[0]} ({col[1]})')
+        full_order_names, not_specified = resolve_column_order(columns, ARGS.column_order)
 
         key_constraints = get_key_constraints(connection, schema, table)
         indexes = get_indexes(connection, schema, table)
@@ -454,9 +525,12 @@ def main():
         foreign_keys = get_foreign_keys(connection, schema, table)
         referencing_foreign_keys = get_referencing_foreign_keys(connection, schema, table)
 
-        print(f'\nDesired new order: {", ".join(ARGS.column_order)}')
+        if ARGS.print_info:
+            print_table_info(schema, table, columns, ARGS.column_order, not_specified,
+                              key_constraints, indexes, check_constraints,
+                              foreign_keys, referencing_foreign_keys)
 
-        sql = generate_reorder_sql(schema, table, columns, ARGS.column_order,
+        sql = generate_reorder_sql(schema, table, columns, full_order_names,
                                     key_constraints=key_constraints, indexes=indexes,
                                     check_constraints=check_constraints, foreign_keys=foreign_keys,
                                     referencing_foreign_keys=referencing_foreign_keys)
