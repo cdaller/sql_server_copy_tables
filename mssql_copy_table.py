@@ -18,7 +18,7 @@ import re
 import logging
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 import os
 
@@ -436,6 +436,34 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         page_count = page_start
         offset = page_start * page_size
         print_page_info = True
+        rows_copied_so_far = 0
+        # elapsed time measured only up to the last *completed* page, used for ETA
+        # so an in-progress write (of unknown duration) never skews the rate estimate
+        elapsed_completed = 0
+        # length of the currently printed *mutable tail* (write-in-progress ticker + ETA),
+        # so it can be erased and reprinted in place without touching earlier pages' output
+        tail_len = [0]
+
+        def erase_tail():
+            if tail_len[0]:
+                print('\b' * tail_len[0] + ' ' * tail_len[0] + '\b' * tail_len[0], end="", flush=True)
+                tail_len[0] = 0
+
+        def format_duration(seconds):
+            hours, remainder = divmod(int(seconds), 3600)
+            minutes, secs = divmod(remainder, 60)
+            if hours:
+                return f"{hours}h {minutes}m {secs}s"
+            if minutes:
+                return f"{minutes}m {secs}s"
+            return f"{secs}s"
+
+        def eta_msg(elapsed_total, rows_done, rows_remaining):
+            if rows_remaining > 0 and rows_done > 0:
+                remaining_sec = elapsed_total / rows_done * rows_remaining
+                eta = datetime.now() + timedelta(seconds=remaining_sec)
+                return f" ETA {eta:%H:%M:%S} ({format_duration(remaining_sec)})"
+            return ""
 
         while True:
             start_time_page = perf_counter()
@@ -476,11 +504,14 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
             duration_sec_page_read = perf_counter() - start_time_page
             row_count = len(rows)
 
+            erase_tail()
+
             if row_count == page_size:
                 if print_page_info:
                     print(f" paging {int(total_row_count / page_size + 1)} pages each {page_size:_} rows, page", end="")
                     print_page_info = False
-                print(f" {page_count}r({duration_sec_page_read:.1f}s)", end="", flush=True)
+                msg = f" {page_count}r({duration_sec_page_read:.1f}s)"
+                print(msg, end="", flush=True)
             else:
                 print(f" reading {row_count:_} rows ({duration_sec_page_read:.1f}s) ", end="", flush=True)
 
@@ -491,18 +522,17 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 placeholders = ', '.join(['?' for _ in rows_to_insert[0]])
                 insert_sql = f"INSERT INTO {target_schema}.{table_name} ({column_list}) VALUES ({placeholders})"
 
-                progress_len = [0]
                 stop_progress = threading.Event()
 
                 def report_write_progress():
                     write_start = perf_counter()
-                    while not stop_progress.wait(30):
+                    while not stop_progress.wait(5):
                         elapsed = perf_counter() - write_start
-                        if progress_len[0]:
-                            print('\b' * progress_len[0] + ' ' * progress_len[0] + '\b' * progress_len[0], end="", flush=True)
-                        msg = f"w(in progress {elapsed:.0f}s)"
+                        erase_tail()
+                        rows_remaining = total_row_count - offset
+                        msg = f"{page_count}w(in progress {elapsed:.0f}s)" + eta_msg(elapsed_completed, rows_copied_so_far, rows_remaining)
                         print(msg, end="", flush=True)
-                        progress_len[0] = len(msg)
+                        tail_len[0] = len(msg)
 
                 progress_thread = threading.Thread(target=report_write_progress, daemon=True)
                 progress_thread.start()
@@ -515,11 +545,20 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                     stop_progress.set()
                     progress_thread.join()
 
-                if progress_len[0]:
-                    print('\b' * progress_len[0] + ' ' * progress_len[0] + '\b' * progress_len[0], end="", flush=True)
+                erase_tail()
 
                 duration_sec_page_write = perf_counter() - start_time_page - duration_sec_page_read
-                print(f"w({duration_sec_page_write:.1f}s)", end="", flush=True)
+                msg = f"{page_count}w({duration_sec_page_write:.1f}s)"
+                print(msg, end="", flush=True)
+
+            if row_count == page_size:
+                rows_copied_so_far += row_count
+                elapsed_completed = perf_counter() - start_time
+                if dry_run:
+                    rows_remaining = total_row_count - offset - row_count
+                    msg = eta_msg(elapsed_completed, rows_copied_so_far, rows_remaining)
+                    print(msg, end="", flush=True)
+                    tail_len[0] = len(msg)
 
             offset += page_size
 
