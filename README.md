@@ -540,9 +540,11 @@ This prints the current column order, a warning about any columns left out of `c
 end), and the generated SQL, including steps to drop/recreate `FK_User_Country`, `PK_User`, `UQ_User_Email` and
 `IX_User_LastName_FirstName` around the rebuild.
 
-By default the SQL is only printed, not executed (`--print-sql` defaults to `True`, `--execute-sql` defaults to
-`False`). Add `--execute-sql` to run the generated statements directly against the database, or `--no-print-sql` to
-suppress the printed SQL (e.g. when combined with `--execute-sql` to only see the connection/progress messages):
+By default, info about the current table (columns with their defaults/identity/nullability, primary key/unique
+constraints, indexes, check constraints and foreign keys in both directions) is printed (`--print-info`, default
+`True`), the generated SQL is printed (`--print-sql`, default `True`), but nothing is executed against the database
+(`--execute-sql`, default `False`). Each of the three can be toggled independently, e.g. `--no-print-info` to skip the
+table info and only see the generated SQL, or add `--execute-sql` to run the generated statements directly:
 
 ```bash
 ./mssql_reorder_columns.py \
