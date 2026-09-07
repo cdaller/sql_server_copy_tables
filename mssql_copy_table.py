@@ -17,6 +17,7 @@ import argparse
 import re
 import logging
 import time
+import threading
 from datetime import datetime
 from typing import List, Dict, Tuple
 import os
@@ -489,10 +490,34 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 #print(f" inserting into {target_schema}.{table_name} ({column_list}) ({len(rows_to_insert)} rows) ", flush=True)
                 placeholders = ', '.join(['?' for _ in rows_to_insert[0]])
                 insert_sql = f"INSERT INTO {target_schema}.{table_name} ({column_list}) VALUES ({placeholders})"
-                target_cursor.executemany(insert_sql, rows_to_insert)
-                #print(f" before commit {target_schema}.{table_name}", flush=True)
-                target_conn.commit()
-                #print(f" after commit {target_schema}.{table_name}", flush=True)
+
+                progress_len = [0]
+                stop_progress = threading.Event()
+
+                def report_write_progress():
+                    write_start = perf_counter()
+                    while not stop_progress.wait(30):
+                        elapsed = perf_counter() - write_start
+                        if progress_len[0]:
+                            print('\b' * progress_len[0] + ' ' * progress_len[0] + '\b' * progress_len[0], end="", flush=True)
+                        msg = f"w(in progress {elapsed:.0f}s)"
+                        print(msg, end="", flush=True)
+                        progress_len[0] = len(msg)
+
+                progress_thread = threading.Thread(target=report_write_progress, daemon=True)
+                progress_thread.start()
+                try:
+                    target_cursor.executemany(insert_sql, rows_to_insert)
+                    #print(f" before commit {target_schema}.{table_name}", flush=True)
+                    target_conn.commit()
+                    #print(f" after commit {target_schema}.{table_name}", flush=True)
+                finally:
+                    stop_progress.set()
+                    progress_thread.join()
+
+                if progress_len[0]:
+                    print('\b' * progress_len[0] + ' ' * progress_len[0] + '\b' * progress_len[0], end="", flush=True)
+
                 duration_sec_page_write = perf_counter() - start_time_page - duration_sec_page_read
                 print(f"w({duration_sec_page_write:.1f}s)", end="", flush=True)
 
