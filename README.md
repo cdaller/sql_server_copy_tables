@@ -471,3 +471,86 @@ but skip them and right start with the fifth table:
 The file ```progress-dbo.track``` will be created and every sucessfull copy step is logged there. On a restart
 of the same command, the entries in the track file are checked if there were successfully executed before. In this 
 case they will be skipped and continued with the next operation.
+
+## Reorder Table Columns
+
+SQL Server has no built-in way to change the physical column order of a table. `mssql_reorder_columns.py` works around this
+by generating a script that creates a new table with the desired column order, copies the data over, drops the original
+table and renames the new one back to the original name. It also recreates primary key/unique constraints, check
+constraints, foreign keys (both defined on the table and referencing it from other tables) and indexes.
+
+The script only **prints** the generated SQL - it does not execute anything against the database. Review the output and
+run it yourself (e.g. with `mssql_execute_sql.py` or any SQL client).
+
+Note: triggers and permissions/grants on the table are not detected or recreated - add those back manually if needed.
+
+### Example table
+
+Given a table with a primary key, a default value, a unique index and a foreign key:
+
+```sql
+CREATE TABLE dbo.Country (
+    country_id INT IDENTITY(1,1) NOT NULL,
+    iso_code   CHAR(2) NOT NULL,
+    CONSTRAINT PK_Country PRIMARY KEY CLUSTERED (country_id)
+);
+
+CREATE TABLE dbo.[User] (
+    id          INT IDENTITY(1,1) NOT NULL,
+    email       NVARCHAR(255) NOT NULL,
+    first_name  NVARCHAR(100) NULL,
+    last_name   NVARCHAR(100) NULL,
+    country_id  INT NOT NULL,
+    is_active   BIT NOT NULL DEFAULT 1,
+    created_at  DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT PK_User PRIMARY KEY CLUSTERED (id),
+    CONSTRAINT UQ_User_Email UNIQUE NONCLUSTERED (email),
+    CONSTRAINT FK_User_Country FOREIGN KEY (country_id) REFERENCES dbo.Country (country_id)
+);
+
+CREATE NONCLUSTERED INDEX IX_User_LastName_FirstName ON dbo.[User] (last_name, first_name);
+
+INSERT INTO dbo.Country (iso_code) VALUES
+    ('AT'),
+    ('DE'),
+    ('CH');
+
+INSERT INTO dbo.[User] (email, first_name, last_name, country_id) VALUES
+    ('alice@example.com', 'Alice', 'Adams', 1),
+    ('bob@example.com',   'Bob',   'Brown', 2),
+    ('carol@example.com', 'Carol', 'Clark', 3);
+```
+
+### Calling the script
+
+To move `email` and `country_id` to the front of the column list (all other columns are kept and appended in their
+original order):
+
+```bash
+./mssql_reorder_columns.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --table dbo.User \
+    email country_id id first_name last_name is_active created_at
+```
+
+This prints the current column order, a warning about any columns left out of `column_order` (they get appended at the
+end), and the generated SQL, including steps to drop/recreate `FK_User_Country`, `PK_User`, `UQ_User_Email` and
+`IX_User_LastName_FirstName` around the rebuild.
+
+By default the SQL is only printed, not executed (`--print-sql` defaults to `True`, `--execute-sql` defaults to
+`False`). Add `--execute-sql` to run the generated statements directly against the database, or `--no-print-sql` to
+suppress the printed SQL (e.g. when combined with `--execute-sql` to only see the connection/progress messages):
+
+```bash
+./mssql_reorder_columns.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --table dbo.User \
+    --execute-sql \
+    email country_id id first_name last_name is_active created_at
+```
