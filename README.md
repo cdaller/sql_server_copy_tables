@@ -605,6 +605,154 @@ The file ```progress-dbo.track``` will be created and every sucessfull copy step
 of the same command, the entries in the track file are checked if there were successfully executed before. In this 
 case they will be skipped and continued with the next operation.
 
+## Compare Table Content Row-by-Row
+
+`mssql_compare_table.py` compares the actual row content of two tables that have the same columns/types but come
+from different sources - e.g. the same table copied into different schemata, different databases, or even
+different servers. It reports:
+
+* rows that only exist in one of the two tables (based on a unique key), and
+* rows that exist in both, but differ in one or more compared columns.
+
+Rows are matched between the two tables using a key (one or more columns) - by default the primary key is
+auto-detected (tried on table1 first, then table2), or you can set it explicitly with `--key-columns` if neither
+table has one, or if you want to match rows on other criteria.
+
+By default all columns common to both tables are compared; use `--compare-columns` to compare only specific
+columns, and/or `--compare-columns-exclude` to leave out specific columns (e.g. an audit/timestamp column that is
+expected to differ).
+
+The script only reads data - it never modifies either table.
+
+### Authentication and connections
+
+Authentication works the same way as in `mssql_copy_table.py` / `mssql_execute_sql.py` (username/password or
+`AzureActiveDirectory`, using `az login` beforehand).
+
+If the two tables live in the same database, just specify the connection once (`--server`, `--db`,
+`--authentication`, `--user`, `--password`) together with `--schema1`/`--schema2` and/or `--table1`/`--table2`. If
+no `--server2`/`--db2`/... is given at all, a single connection is reused for both tables.
+
+To compare tables in different databases or on different servers, add `--server2`, `--db2`, `--driver2`,
+`--authentication2`, `--user2`, `--password2` for the second table - each independently defaults to the value of
+the corresponding first-table option (except `--authentication2`, which defaults to `UsernamePassword` rather than
+inheriting `AzureActiveDirectory`, since the second server is likely to need different credentials).
+
+### Naming the tables to compare
+
+* `--schema1`/`--table1` (aliases `--schema`/`--table`) are required.
+* `--schema2` defaults to `--schema1` (compare the same schema across two databases/servers).
+* `--table2` defaults to `--table1` (compare the same table name across two schemata/databases/servers).
+
+This covers all combinations: same table name in different schemata, different table names in the same schema, or
+any mix across different databases/servers.
+
+### Basic example: same database, different schema
+
+```bash
+./mssql_compare_table.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --schema1 AUT_DSL \
+    --schema2 DSL \
+    --table1 DH7OBJ \
+    --compare-columns O_DV_KDNR
+```
+
+### Comparing across two different servers/databases
+
+```bash
+./mssql_compare_table.py \
+    --server portal-int-cl1-rel-sqlserver.database.windows.net \
+    --db portal-int-cl1-rel-liferay-db \
+    --authentication AzureActiveDirectory \
+    --server2 localhost \
+    --db2 liferay-db \
+    --user2 sa \
+    --password2 xxx \
+    --schema1 AUT_DSL \
+    --schema2 DSL \
+    --table1 DH7OBJ
+```
+
+### Output
+
+By default a CSV is printed to stdout with columns `diff_type` (`only_in_table1`, `only_in_table2` or `different`),
+`source` (identifying which table a row came from - only the server/db/schema/table parts that actually differ
+between the two sides are shown) and the key/compared columns. Use `--output <file>` to write it to a file instead.
+
+For a `different` row, two CSV rows are printed (one per table) so the differing values can be compared directly.
+This flat format works, but with many differing columns it can be hard to see at a glance which cells actually
+differ.
+
+#### Side-by-side diff files for an editor compare view
+
+Pass `--diff-dir <dir>` to additionally write two CSV files into that directory - one per table, named after the
+parts of server/db/schema/table that differ between them (the table name is always included). Both files contain
+one row per key value, sorted and aligned identically, with missing rows left blank. Open both files in an editor's
+built-in compare view (VS Code: right-click a file -> "Select for Compare", then right-click the other -> "Compare
+with Selected"; IntelliJ: select both files -> "Compare Files") to see row/cell differences highlighted directly -
+much easier to read than the flat CSV.
+
+```bash
+./mssql_compare_table.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --schema1 AUT_DSL \
+    --schema2 DSL \
+    --table1 DH7OBJ \
+    --diff-dir ./diff-out
+```
+
+When `--diff-dir` is used without an explicit `--output`, the flat CSV (which would otherwise clutter stdout) is
+skipped - only the diff files and a one-line summary are printed.
+
+By default the diff files include all rows (matching rows too, so the two files stay fully aligned for context).
+Use `--max-diff-rows <n>` to cap the number of rows reported per category (only-in-table1, only-in-table2,
+differing) - this also limits `--diff-dir` to just the (capped) differing rows, dropping the unchanged ones.
+
+### Reducing noise in the comparison
+
+* `--ignore-whitespace-start-end` ignores leading/trailing whitespace differences in string values.
+* `--normalize-special-chars` replaces a fixed set of look-alike special characters (curly/low quotes such as
+  `„`/`"`/`"` -> `"`, `'`/`'`/`‚` -> `'`, en/em dash -> `-`) before comparing, to ignore differences caused by
+  values coming from different encodings/sources. Both flags also apply to the values written to `--diff-dir`
+  files.
+
+```bash
+./mssql_compare_table.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --schema1 AUT_DSL \
+    --schema2 DSL \
+    --table1 DH7OBJ \
+    --ignore-whitespace-start-end \
+    --normalize-special-chars
+```
+
+### Comparing only a subset of rows
+
+Just like `mssql_copy_table.py`, `--where` and `--join` narrow down the rows read for comparison. The table being
+read is aliased `source_table` in both the where clause and the joins:
+
+```bash
+./mssql_compare_table.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --schema1 AUT_DSL \
+    --schema2 DSL \
+    --table1 DH7OBJ \
+    --where "source_table.O_DV_KDNR >= 10000 and source_table.O_DV_KDNR < 20000"
+```
+
 ## Reorder Table Columns
 
 SQL Server has no built-in way to change the physical column order of a table. `mssql_reorder_columns.py` works around this
