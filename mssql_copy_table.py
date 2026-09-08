@@ -64,7 +64,8 @@ def parse_args():
     parser.add_argument('--table-filter', dest='table_filter', default = None, help='Filter on table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
     parser.add_argument('--table-filter-exclude', dest='table_filter_exclude', default = None, help='Filter out table names using this regular expression (regexp must match table names). Use with "--all-tables" or one of the "list-tables" arguments. (default: %(default)s)')
     parser.add_argument('--page-size', dest='page_size', default = 50000, type=int, help='Page size of rows that are copied in one step. Depending on the size of table, values between 50000 (default) and 500000 are working well (depending on the number of rows, etc.). (default: %(default)d)')
-    parser.add_argument('--page-start', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
+    parser.add_argument('--page-start', '--start-page', dest='page_start', default = 1, type=int, help='Page to start with. Please note that the first page number ist 1 to match the output during copying of the data. The output of a page number indicates the page is read. The "w" after the page number shows that the pages was successfully written. Please also note that this settings does not make much sense if you copy more than one table! (default: %(default)d)')
+    parser.add_argument('--auto-resume', dest='auto_resume', default=False, action='store_true', help='Before copying a table, compare the row count already present in the target table with the source table. If they match exactly, the table is assumed to be fully copied already and is skipped. If the target row count is an exact multiple of "--page-size", copying automatically resumes at the correct page instead of starting over. (default: %(default)s)')
 
     parser.add_argument('--where', dest='where_clause', default = None, help='If set, this where clause is added to all queries executed on the source data source. If you only want to add some rows, use in combination with the params "--no-create-table --no-drop-indices --no-copy-indices". (default: %(default)s)')
     parser.add_argument('--delete-where', dest='delete_where', default = False, action=argparse.BooleanOptionalAction, help='Delete all rows in the target table using the given where clause if a where clause is set with the "--where" parameter. (default: %(default)s)')
@@ -398,6 +399,7 @@ def get_primary_key_column_names(source_conn, source_schema, table_name):
 def copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start, dry_run=False, page_size=50000, where_clause=None, joins=None):
     print(f"Copying table {table_name} {'using where clause [' + where_clause + ']' if where_clause else ''}...", end="", flush=True)
     start_time = perf_counter()
+    start_datetime = datetime.now()
 
     primary_key = get_numerical_primary_key(source_conn, source_schema, table_name)
     if primary_key:
@@ -461,7 +463,9 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
         def eta_msg(elapsed_total, rows_done, rows_remaining):
             if rows_remaining > 0 and rows_done > 0:
                 remaining_sec = elapsed_total / rows_done * rows_remaining
-                eta = datetime.now() + timedelta(seconds=remaining_sec)
+                # anchor to the fixed start time (not datetime.now()) so the ETA stays
+                # stable across ticks instead of drifting forward as real time passes
+                eta = start_datetime + timedelta(seconds=elapsed_total + remaining_sec)
                 return f" ETA {eta:%H:%M:%S} ({format_duration(remaining_sec)})"
             return ""
 
@@ -587,6 +591,15 @@ def truncate_table(connection, schema_name, table_name, dry_run = False):
         connection.commit()
     print(" - done")
 
+def table_exists(connection, schema_name, table_name) -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT *
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+        """, (schema_name, table_name))
+        return cursor.fetchone() is not None
+
 def get_row_count(connection, schema_name, table_name, where_clause, joins) -> int:
     with connection.cursor() as cursor:
         join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
@@ -652,10 +665,14 @@ def copy_indices(source_conn, target_conn, source_schema, table_name, target_sch
             # Construct and execute CREATE INDEX statements
             indices = source_cursor.fetchall()
             num_indices = len(indices)
+            existing_target_indices = set(get_indices(target_cursor, target_schema, table_name).keys()) if not dry_run else set()
             if num_indices > 0:
                 print(f"Create {len(indices)} index object(s) for table {target_schema}.{table_name}: ", end="")
                 for row in indices:
                     index_name, columns, is_unique = row
+                    if index_name in existing_target_indices:
+                        print(f"{index_name}(exists, skipped) ", end="", flush=True)
+                        continue
                     unique_clause = "UNIQUE" if is_unique else ""
                     create_index_query = f"CREATE {unique_clause} INDEX [{index_name}] ON [{target_schema}].[{table_name}] ({columns})"
                     if not dry_run:
@@ -1110,50 +1127,68 @@ def main():
                 copy_data_completed = has_progress_track_success(ARGS.progress_file_name, copy_status_id)
                 force_recreate = not copy_data_completed # force drop/create if the copy was not completed before (prevents hanging pyodbc executemany))
 
+                page_start = ARGS.page_start
+                skip_copy_data = False
+
+                if ARGS.auto_resume and ARGS.copy_data and table_exists(target_conn, target_schema, table_name):
+                    source_total_row_count = get_row_count(source_conn, source_schema, table_name, ARGS.where_clause, ARGS.joins)
+                    target_total_row_count = get_row_count(target_conn, target_schema, table_name, None, None)
+                    if target_total_row_count == source_total_row_count:
+                        print(f"Table {target_schema}.{table_name} already has {target_total_row_count:_} rows (matches source) - skipping copy.")
+                        skip_copy_data = True
+                    elif target_total_row_count > 0 and target_total_row_count % ARGS.page_size == 0:
+                        page_start = target_total_row_count // ARGS.page_size + 1
+                        print(f"INFO: Table {target_schema}.{table_name} target already has {target_total_row_count:_} rows, a multiple of page size {ARGS.page_size:_} - auto-resuming at page {page_start}.")
+
+                # a resumed/already-complete copy must not have its table recreated or indices dropped,
+                # or the data we are resuming from (or skipping re-copying) would be destroyed
+                resuming = page_start != 1 or skip_copy_data
+                resuming_reason = "the table is already fully copied" if skip_copy_data else f"a start page ({page_start}) is set"
+
                 if ARGS.truncate_table:
-                    if ARGS.page_start != 1:
-                        print("WARNING: Setting a start page and truncating the table does not make sense! - ignore the truncation!")
+                    if resuming:
+                        print(f"WARNING: Not truncating table {target_schema}.{table_name} because {resuming_reason}!")
                     else:
                         status_id = f'truncate_{target_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: truncate_table(target_conn, target_schema, table_name, ARGS.dry_run))
-                        
+
                 elif ARGS.create_table:
-                    if ARGS.page_start != 1:
-                        print("WARNING: Setting a start page and recreating the table does not make sense - ignore the table creation!")
+                    if resuming:
+                        print(f"WARNING: Not (re)creating table {target_schema}.{table_name} because {resuming_reason}!")
                     else:
                         status_id = f'drop-table_{target_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_table_if_exists(target_conn, target_schema, table_name, ARGS.dry_run), force_rerun=force_recreate)
-                        
+
                         status_id = f'create-table_{target_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: create_table(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run), force_rerun=force_recreate)
 
 
                 # drop indices (no need if tables were dropped and recreated just before):
                 if ARGS.drop_indices and not ARGS.create_table:
-                    if ARGS.page_start != 1:
-                        print("WARNING: Setting a start page results in ignoring index dropping!")
+                    if resuming:
+                        print(f"WARNING: Not dropping indices of table {target_schema}.{table_name} because {resuming_reason}!")
                     else:
                         status_id = f'drop_indices_{target_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: drop_all_indices(target_conn, target_schema, table_name, ARGS.dry_run))
-                        
+
 
                 # If a where clause is set and the rows should also be deleted first:
                 if ARGS.where_clause and ARGS.delete_where:
                     status_id = f'delete_data_{target_schema}.{table_name}{id_where_clause}'
                     execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: delete_data(target_conn, target_schema, table_name, ARGS.where_clause, ARGS.joins, ARGS.dry_run))
-                    
+
 
                 # Copy data from source to target
-                if ARGS.copy_data:
+                if ARGS.copy_data and not skip_copy_data:
                     # clustered indices cannot be disabled (then insertion is not possible anymore!)
                     # alter_all_indices(target_conn, target_schema, table_name, 'DISABLE', ARGS.dry_run)
-                    execute_with_progress_track(ARGS.progress_file_name, copy_status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause, ARGS.joins))
+                    execute_with_progress_track(ARGS.progress_file_name, copy_status_id, lambda: copy_data(source_conn, target_conn, source_schema, table_name, target_schema, page_start - 1, ARGS.dry_run, ARGS.page_size, ARGS.where_clause, ARGS.joins))
                     # alter_all_indices(target_conn, target_schema, table_name, 'REBUILD', ARGS.dry_run)
 
                 # create indices
                 if ARGS.copy_indices:
-                    if ARGS.page_start != 1 and not ARGS.drop_indices:
-                        print("WARNING: Setting a start page results in ignoring index creation!")
+                    if resuming and not ARGS.drop_indices:
+                        print(f"WARNING: Not creating indices for table {target_schema}.{table_name} because {resuming_reason}!")
                     else:
                         status_id = f'copy-indices_{source_schema}.{table_name}'
                         execute_with_progress_track(ARGS.progress_file_name, status_id, lambda: copy_indices(source_conn, target_conn, source_schema, table_name, target_schema, ARGS.dry_run))
