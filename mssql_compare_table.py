@@ -56,10 +56,13 @@ def parse_args():
     parser.add_argument('--compare-columns-exclude', dest='compare_columns_exclude', nargs='+', help='column(s) to leave out of the comparison (applied after --compare-columns, e.g. to exclude a common column from the default "all columns" comparison).')
 
     parser.add_argument('--output', dest='output', default=None, help='write CSV output to this file instead of stdout')
-    parser.add_argument('--diff-dir', dest='diff_dir', default=None, help='additionally write two CSV files (left.csv for table1, right.csv for table2) into this directory, one row per key value (sorted and aligned by key column(s), missing rows left blank). Open both in a diff view (e.g. VS Code "Compare Active File With..." or IntelliJ "Compare Files") to see differences highlighted per line/cell.')
+    parser.add_argument('--diff-dir', dest='diff_dir', default=None, help='additionally write two CSV files (left.csv for table1, right.csv for table2) into this directory, one row per key value (sorted and aligned by key column(s), missing rows left blank), containing only the differing/missing rows by default. Open both in a diff view (e.g. VS Code "Compare Active File With..." or IntelliJ "Compare Files") to see differences highlighted per line/cell.')
+    parser.add_argument('--diff-dir-include-unchanged', dest='diff_dir_include_unchanged', default=False, action='store_true', help='also include rows that are identical in both tables in the --diff-dir files, keeping the full aligned table for context (default: %(default)s)')
+    parser.add_argument('--diff-dir-exclude-missing', dest='diff_dir_exclude_missing', default=False, action='store_true', help='exclude rows that only exist in one of the two tables from the --diff-dir files, keeping only rows present in both tables that differ (default: %(default)s)')
     parser.add_argument('--max-diff-rows', dest='max_diff_rows', default=None, type=int, help='maximum number of rows to report per category (only-in-table1, only-in-table2, differing) to keep output manageable. Default: unlimited.')
     parser.add_argument('--ignore-whitespace-start-end', dest='ignore_whitespace_start_end', default=False, action='store_true', help='ignore leading/trailing whitespace differences in string values when comparing rows. Also applies to the values written to --diff-dir files. (default: %(default)s)')
     parser.add_argument('--normalize-special-chars', dest='normalize_special_chars', default=False, action='store_true', help=f'replace special characters using a fixed built-in table ({SPECIAL_CHAR_REPLACEMENTS}) before comparing values, to ignore differences caused by different encodings/sources of the same character (e.g. curly vs. straight quotes). Also applies to the values written to --diff-dir files. (default: %(default)s)')
+    parser.add_argument('--treat-null-as-empty', dest='treat_null_as_empty', default=False, action='store_true', help='treat SQL NULL and an empty string as equal when comparing values. Also applies to the values written to --diff-dir files. Without this flag, a NULL value is written as <NULL> in --diff-dir files to distinguish it from an empty string (both would otherwise render as a blank cell). (default: %(default)s)')
 
     parser.add_argument('--where', dest='where_clause', default=None, help='If set, this where clause is added to the queries used to read rows from both tables for comparison. The original table name is "source_table" to use in the where clause. (default: %(default)s)')
     parser.add_argument('--join', nargs='+', action='extend', dest='joins', default=None, help='Add one or more joins to the selection of data read for comparison (probably only useful in combination with the --where clause). The original table name is "source_table" to use in the joins. Either use the parameter multiple times or separate the joins with spaces. (default: %(default)s)')
@@ -167,7 +170,9 @@ def sanitize_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]+', '_', name).strip('_')
 
 
-def normalize_value(value, trim, replace_special_chars):
+def normalize_value(value, trim, replace_special_chars, treat_null_as_empty):
+    if value is None:
+        return '' if treat_null_as_empty else None
     if not isinstance(value, str):
         return value
     if replace_special_chars:
@@ -178,8 +183,12 @@ def normalize_value(value, trim, replace_special_chars):
     return value
 
 
-def normalize_row(row, trim, replace_special_chars):
-    return tuple(normalize_value(v, trim, replace_special_chars) for v in row)
+def normalize_row(row, trim, replace_special_chars, treat_null_as_empty):
+    return tuple(normalize_value(v, trim, replace_special_chars, treat_null_as_empty) for v in row)
+
+
+def mark_nulls(row):
+    return ['<NULL>' if v is None else v for v in row]
 
 
 def fetch_rows(connection, schema, table, select_columns, where_clause=None, joins=None):
@@ -305,9 +314,9 @@ def main():
         for key in common_keys:
             row1 = by_key1[key]
             row2 = by_key2[key]
-            if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars:
-                left_values = normalize_row(row1[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars)
-                right_values = normalize_row(row2[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars)
+            if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars or ARGS.treat_null_as_empty:
+                left_values = normalize_row(row1[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
+                right_values = normalize_row(row2[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
                 values_differ = left_values != right_values
             else:
                 values_differ = tuple(row1[key_len:]) != tuple(row2[key_len:])
@@ -370,20 +379,19 @@ def main():
                 left_writer.writerow(select_columns)
                 right_writer.writerow(select_columns)
 
-                if ARGS.max_diff_rows is not None:
-                    # a limit is set: only write the (capped) differing rows, not the full aligned table
-                    diff_dir_keys = set(sorted_only_in_1) | set(sorted_only_in_2) | set(sorted_different_keys)
+                missing_keys = set() if ARGS.diff_dir_exclude_missing else set(sorted_only_in_1) | set(sorted_only_in_2)
+                if ARGS.diff_dir_include_unchanged:
+                    diff_dir_keys = (common_keys - set(different_keys)) | missing_keys | set(sorted_different_keys)
                 else:
-                    # unlimited: keep all matching (unchanged) rows too, for alignment context
-                    diff_dir_keys = common_keys - set(different_keys) | set(sorted_only_in_1) | set(sorted_only_in_2) | set(sorted_different_keys)
+                    diff_dir_keys = missing_keys | set(sorted_different_keys)
                 for key in sorted(diff_dir_keys):
                     left_row = list(by_key1[key]) if key in by_key1 else list(key) + blank_row[key_len:]
                     right_row = list(by_key2[key]) if key in by_key2 else list(key) + blank_row[key_len:]
-                    if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars:
-                        left_row = list(normalize_row(left_row, ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars))
-                        right_row = list(normalize_row(right_row, ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars))
-                    left_writer.writerow(left_row)
-                    right_writer.writerow(right_row)
+                    if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars or ARGS.treat_null_as_empty:
+                        left_row = list(normalize_row(left_row, ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty))
+                        right_row = list(normalize_row(right_row, ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty))
+                    left_writer.writerow(mark_nulls(left_row))
+                    right_writer.writerow(mark_nulls(right_row))
 
             print(f'wrote diff files for use in an editor compare view: {left_path} <-> {right_path}', file=sys.stderr)
 

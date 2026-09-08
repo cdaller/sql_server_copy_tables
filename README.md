@@ -722,8 +722,13 @@ keeping just the common rows that differ. `--max-diff-rows <n>` caps the number 
 * `--ignore-whitespace-start-end` ignores leading/trailing whitespace differences in string values.
 * `--normalize-special-chars` replaces a fixed set of look-alike special characters (curly/low quotes such as
   `„`/`"`/`"` -> `"`, `'`/`'`/`‚` -> `'`, en/em dash -> `-`) before comparing, to ignore differences caused by
-  values coming from different encodings/sources. Both flags also apply to the values written to `--diff-dir`
-  files.
+  values coming from different encodings/sources.
+* `--treat-null-as-empty` treats a SQL `NULL` and an empty string as equal when comparing. Without it, `NULL`
+  and `''` are correctly reported as different, but note that a plain CSV renders both as a blank cell - to
+  make that distinction visible, `--diff-dir` writes `NULL` values as the literal marker `<NULL>` instead of
+  leaving the cell blank (unless `--treat-null-as-empty` is set, in which case `NULL` becomes an empty cell too).
+
+All three flags also apply to the values written to `--diff-dir` files.
 
 ```bash
 ./mssql_compare_table.py \
