@@ -711,9 +711,11 @@ much easier to read than the flat CSV.
 When `--diff-dir` is used without an explicit `--output`, the flat CSV (which would otherwise clutter stdout) is
 skipped - only the diff files and a one-line summary are printed.
 
-By default the diff files include all rows (matching rows too, so the two files stay fully aligned for context).
-Use `--max-diff-rows <n>` to cap the number of rows reported per category (only-in-table1, only-in-table2,
-differing) - this also limits `--diff-dir` to just the (capped) differing rows, dropping the unchanged ones.
+By default the diff files only contain rows that differ or are missing from one side. Use
+`--diff-dir-include-unchanged` to also include matching rows, keeping the two files fully aligned for context.
+Use `--diff-dir-exclude-missing` to go the other way and drop rows that only exist in one of the two tables,
+keeping just the common rows that differ. `--max-diff-rows <n>` caps the number of rows reported per category
+(only-in-table1, only-in-table2, differing), including in the diff files.
 
 ### Reducing noise in the comparison
 
