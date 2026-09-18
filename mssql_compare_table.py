@@ -28,6 +28,19 @@ SPECIAL_CHAR_REPLACEMENTS = {
     '—': '-',  # — em dash
 }
 
+# data types that SQL Server's EXCEPT/comparison operators cannot compare directly;
+# cast to a comparable type first so the SQL-side diff can still use them
+UNCOMPARABLE_CAST = {
+    'text': 'NVARCHAR(MAX)',
+    'ntext': 'NVARCHAR(MAX)',
+    'xml': 'NVARCHAR(MAX)',
+    'image': 'VARBINARY(MAX)',
+    'geography': 'NVARCHAR(MAX)',
+    'geometry': 'NVARCHAR(MAX)',
+}
+# types (after the cast above, if any) that the string-normalization options apply to
+STRING_TYPES = {'char', 'varchar', 'nchar', 'nvarchar', 'text', 'ntext', 'xml'}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Compare two tables (same columns/types) - in different schemata, different databases, or different servers - and print differing rows as CSV.')
@@ -63,6 +76,8 @@ def parse_args():
     parser.add_argument('--ignore-whitespace-start-end', dest='ignore_whitespace_start_end', default=False, action='store_true', help='ignore leading/trailing whitespace differences in string values when comparing rows. Also applies to the values written to --diff-dir files. (default: %(default)s)')
     parser.add_argument('--normalize-special-chars', dest='normalize_special_chars', default=False, action='store_true', help=f'replace special characters using a fixed built-in table ({SPECIAL_CHAR_REPLACEMENTS}) before comparing values, to ignore differences caused by different encodings/sources of the same character (e.g. curly vs. straight quotes). Also applies to the values written to --diff-dir files. (default: %(default)s)')
     parser.add_argument('--treat-null-as-empty', dest='treat_null_as_empty', default=False, action='store_true', help='treat SQL NULL and an empty string as equal when comparing values. Also applies to the values written to --diff-dir files. Without this flag, a NULL value is written as <NULL> in --diff-dir files to distinguish it from an empty string (both would otherwise render as a blank cell). (default: %(default)s)')
+
+    parser.add_argument('--force-full-download', dest='force_full_download', default=False, action='store_true', help='disable the SQL-side diff optimization that is used automatically when both tables are compared over the same connection, and always download full row data for comparison in Python instead. Useful as a fallback if the generated SQL comparison fails for a particular column type. (default: %(default)s)')
 
     parser.add_argument('--where', dest='where_clause', default=None, help='If set, this where clause is added to the queries used to read rows from both tables for comparison. The original table name is "source_table" to use in the where clause. (default: %(default)s)')
     parser.add_argument('--join', nargs='+', action='extend', dest='joins', default=None, help='Add one or more joins to the selection of data read for comparison (probably only useful in combination with the --where clause). The original table name is "source_table" to use in the joins. Either use the parameter multiple times or separate the joins with spaces. (default: %(default)s)')
@@ -202,6 +217,119 @@ def fetch_rows(connection, schema, table, select_columns, where_clause=None, joi
     return rows
 
 
+def get_column_types(connection, schema, table):
+    """Return {column_name: lowercased DATA_TYPE}."""
+    cursor = connection.cursor()
+    cursor.execute("""
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+    """, (schema, table))
+    types = {row.COLUMN_NAME: row.DATA_TYPE.lower() for row in cursor.fetchall()}
+    cursor.close()
+    return types
+
+
+def build_compare_expr(col, data_type, ignore_ws, normalize_special_chars, treat_null_as_empty):
+    """Build a SQL expression for a compare column, used only to decide whether two rows
+    differ (SQL-side diff path). Casts types EXCEPT cannot compare, and mirrors the
+    --ignore-whitespace-start-end / --normalize-special-chars / --treat-null-as-empty
+    normalization for string-like types."""
+    expr = f'source_table.[{col}]'
+    data_type = (data_type or '').lower()
+    cast_to = UNCOMPARABLE_CAST.get(data_type)
+    if cast_to:
+        expr = f'CAST({expr} AS {cast_to})'
+    is_string = data_type in STRING_TYPES
+    if is_string and normalize_special_chars:
+        for old, new in SPECIAL_CHAR_REPLACEMENTS.items():
+            escaped_old = old.replace("'", "''")
+            escaped_new = new.replace("'", "''")
+            expr = f"REPLACE({expr}, N'{escaped_old}', N'{escaped_new}')"
+    if is_string and ignore_ws:
+        expr = f"LTRIM(RTRIM({expr}))"
+    if is_string and treat_null_as_empty:
+        expr = f"ISNULL({expr}, N'')"
+    return expr
+
+
+def build_select_source(schema, table, columns_sql, where_clause, joins):
+    join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
+    where_sql = f'WHERE {where_clause}' if where_clause else ''
+    return f'SELECT {columns_sql} FROM [{schema}].[{table}] source_table {join_sql} {where_sql}'
+
+
+def fetch_key_except(connection, schema1, table1, schema2, table2, key_columns, where_clause, joins):
+    """Return the set of key tuples present in table1 but not in table2 (SQL-side EXCEPT)."""
+    key_sql = ', '.join(f'source_table.[{c}]' for c in key_columns)
+    left = build_select_source(schema1, table1, key_sql, where_clause, joins)
+    right = build_select_source(schema2, table2, key_sql, where_clause, joins)
+    cursor = connection.cursor()
+    cursor.execute(f'{left}\nEXCEPT\n{right}')
+    keys = set(tuple(row) for row in cursor.fetchall())
+    cursor.close()
+    return keys
+
+
+def fetch_differing_key_candidates(connection, schema1, table1, schema2, table2, key_columns,
+                                    compare_only_columns, col_types1, col_types2, where_clause, joins,
+                                    normalize_opts):
+    """Return key tuples of rows in table1 that have no identical (key + compare-column) match in
+    table2. This includes both keys missing from table2 and keys whose values differ; the caller
+    subtracts fetch_key_except() to isolate the truly differing ones."""
+    ignore_ws, normalize_special_chars, treat_null_as_empty = normalize_opts
+    key_sql = ', '.join(f'source_table.[{c}]' for c in key_columns)
+    compare_sql1 = ', '.join(
+        build_compare_expr(c, col_types1.get(c), ignore_ws, normalize_special_chars, treat_null_as_empty) + f' AS [{c}]'
+        for c in compare_only_columns)
+    compare_sql2 = ', '.join(
+        build_compare_expr(c, col_types2.get(c), ignore_ws, normalize_special_chars, treat_null_as_empty)
+        for c in compare_only_columns)
+    full_sql1 = key_sql + (', ' + compare_sql1 if compare_sql1 else '')
+    full_sql2 = key_sql + (', ' + compare_sql2 if compare_sql2 else '')
+    left = build_select_source(schema1, table1, full_sql1, where_clause, joins)
+    right = build_select_source(schema2, table2, full_sql2, where_clause, joins)
+    outer_key_sql = ', '.join(f'[{c}]' for c in key_columns)
+    cursor = connection.cursor()
+    cursor.execute(f'SELECT {outer_key_sql} FROM (\n{left}\nEXCEPT\n{right}\n) diff_candidates')
+    keys = set(tuple(row) for row in cursor.fetchall())
+    cursor.close()
+    return keys
+
+
+def chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def fetch_rows_by_keys(connection, schema, table, select_columns, key_columns, keys, where_clause=None,
+                        joins=None, batch_size=500):
+    """Fetch full rows for an explicit set of key tuples only, batched via VALUES-joins to avoid
+    downloading the whole table."""
+    keys = list(keys)
+    if not keys:
+        return []
+    col_list = ', '.join(f'source_table.[{c}]' for c in select_columns)
+    join_sql = " ".join([f'\nJOIN {join}' for join in joins]) if joins else ''
+    where_sql = f'WHERE ({where_clause})' if where_clause else ''
+    key_cols_sql = ', '.join(f'[{c}]' for c in key_columns)
+    key_join_sql = ' AND '.join(f'source_table.[{c}] = keys_batch.[{c}]' for c in key_columns)
+    rows = []
+    cursor = connection.cursor()
+    for batch in chunked(keys, batch_size):
+        values_sql = ', '.join('(' + ', '.join('?' for _ in key_columns) + ')' for _ in batch)
+        params = [v for key in batch for v in key]
+        query = (
+            f'SELECT {col_list} FROM [{schema}].[{table}] source_table {join_sql} '
+            f'JOIN (VALUES {values_sql}) AS keys_batch({key_cols_sql}) ON {key_join_sql} '
+            f'{where_sql}'
+        )
+        cursor.execute(query, params)
+        rows.extend(cursor.fetchall())
+    cursor.close()
+    return rows
+
+
 def main():
     parser = parse_args()
     ARGS = parser.parse_args()
@@ -297,31 +425,51 @@ def main():
         print(f'comparing [{schema1}].[{table1}] to [{schema2}].[{table2}] using key column(s) {key_columns} '
               f'and comparing column(s) {compare_columns} ...', flush=True)
 
-        rows1 = fetch_rows(connection1, schema1, table1, select_columns, where_clause=ARGS.where_clause, joins=ARGS.joins)
-        rows2 = fetch_rows(connection2, schema2, table2, select_columns, where_clause=ARGS.where_clause, joins=ARGS.joins)
+        # when both tables live on the same connection, do the row matching in SQL (only keys and,
+        # for the value comparison, small derived expressions are transferred) and only download the
+        # full row data for rows that actually differ. --diff-dir-include-unchanged needs every row
+        # anyway, so it isn't worth the extra round trips in that case.
+        use_sql_side_diff = same_connection and not ARGS.diff_dir_include_unchanged and not ARGS.force_full_download
 
-        by_key1 = {tuple(row[:key_len]): row for row in rows1}
-        by_key2 = {tuple(row[:key_len]): row for row in rows2}
+        if use_sql_side_diff:
+            print('using SQL-side diff (same connection) ...', flush=True)
+            col_types1 = get_column_types(connection1, schema1, table1)
+            col_types2 = get_column_types(connection2, schema2, table2)
+            normalize_opts = (ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
 
-        keys1 = set(by_key1.keys())
-        keys2 = set(by_key2.keys())
+            only_in_1 = fetch_key_except(connection1, schema1, table1, schema2, table2, key_columns, ARGS.where_clause, ARGS.joins)
+            only_in_2 = fetch_key_except(connection1, schema2, table2, schema1, table1, key_columns, ARGS.where_clause, ARGS.joins)
+            diff_candidates = fetch_differing_key_candidates(
+                connection1, schema1, table1, schema2, table2, key_columns, compare_only_columns,
+                col_types1, col_types2, ARGS.where_clause, ARGS.joins, normalize_opts)
+            different_keys = diff_candidates - only_in_1
+            common_keys = set()
+        else:
+            rows1 = fetch_rows(connection1, schema1, table1, select_columns, where_clause=ARGS.where_clause, joins=ARGS.joins)
+            rows2 = fetch_rows(connection2, schema2, table2, select_columns, where_clause=ARGS.where_clause, joins=ARGS.joins)
 
-        only_in_1 = keys1 - keys2
-        only_in_2 = keys2 - keys1
-        common_keys = keys1 & keys2
+            by_key1 = {tuple(row[:key_len]): row for row in rows1}
+            by_key2 = {tuple(row[:key_len]): row for row in rows2}
 
-        different_keys = []
-        for key in common_keys:
-            row1 = by_key1[key]
-            row2 = by_key2[key]
-            if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars or ARGS.treat_null_as_empty:
-                left_values = normalize_row(row1[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
-                right_values = normalize_row(row2[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
-                values_differ = left_values != right_values
-            else:
-                values_differ = tuple(row1[key_len:]) != tuple(row2[key_len:])
-            if values_differ:
-                different_keys.append(key)
+            keys1 = set(by_key1.keys())
+            keys2 = set(by_key2.keys())
+
+            only_in_1 = keys1 - keys2
+            only_in_2 = keys2 - keys1
+            common_keys = keys1 & keys2
+
+            different_keys = []
+            for key in common_keys:
+                row1 = by_key1[key]
+                row2 = by_key2[key]
+                if ARGS.ignore_whitespace_start_end or ARGS.normalize_special_chars or ARGS.treat_null_as_empty:
+                    left_values = normalize_row(row1[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
+                    right_values = normalize_row(row2[key_len:], ARGS.ignore_whitespace_start_end, ARGS.normalize_special_chars, ARGS.treat_null_as_empty)
+                    values_differ = left_values != right_values
+                else:
+                    values_differ = tuple(row1[key_len:]) != tuple(row2[key_len:])
+                if values_differ:
+                    different_keys.append(key)
 
         sorted_only_in_1 = sorted(only_in_1)
         sorted_only_in_2 = sorted(only_in_2)
@@ -339,6 +487,17 @@ def main():
         if truncated_only_in_1 or truncated_only_in_2 or truncated_different:
             print(f'NOTE: more than --max-diff-rows ({ARGS.max_diff_rows}) differing rows found, '
                   f'output is truncated per category.', file=sys.stderr)
+
+        if use_sql_side_diff:
+            # only fetch the full row data actually needed for output, not the whole table
+            keys_needed_from_1 = set(sorted_only_in_1) | set(sorted_different_keys)
+            keys_needed_from_2 = set(sorted_only_in_2) | set(sorted_different_keys)
+            by_key1 = {tuple(row[:key_len]): row for row in fetch_rows_by_keys(
+                connection1, schema1, table1, select_columns, key_columns, keys_needed_from_1,
+                where_clause=ARGS.where_clause, joins=ARGS.joins)}
+            by_key2 = {tuple(row[:key_len]): row for row in fetch_rows_by_keys(
+                connection2, schema2, table2, select_columns, key_columns, keys_needed_from_2,
+                where_clause=ARGS.where_clause, joins=ARGS.joins)}
 
         source1, source2 = describe_table(config1, schema1, table1, config2, schema2, table2)
 
