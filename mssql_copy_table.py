@@ -122,7 +122,7 @@ def create_connection(config) -> pyodbc.Connection:
 #    conn_str = f'DRIVER={config["driver"]};SERVER={config["server"]};DATABASE={config["database"]};UID={config["user"]};PWD={config["password"]};Encrypt=Yes;TrustServerCertificate=Yes;'
 # jdbc:sqlserver://portal-int-cl1-prod-sqlserver.database.windows.net:1433;encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30;authentication=ActiveDirectoryPassword
 
-    conn_str = f'DRIVER={config["driver"]};SERVER={config["server"]};DATABASE={config["database"]};Encrypt=Yes;TrustServerCertificate=Yes;hostNameInCertificate=*.database.windows.net;loginTimeout=30'
+    conn_str = f'DRIVER={config["driver"]};SERVER={config["server"]};DATABASE={config["database"]};Encrypt=Yes;TrustServerCertificate=Yes;hostNameInCertificate=*.database.windows.net;loginTimeout=30;Packet Size=32767'
     attrs_before = None
 
     if "authentication" in config and config["authentication"]  == 'AzureActiveDirectory':
@@ -524,7 +524,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
                 rows_to_insert = [tuple(r) for r in rows]
                 #print(f" inserting into {target_schema}.{table_name} ({column_list}) ({len(rows_to_insert)} rows) ", flush=True)
                 placeholders = ', '.join(['?' for _ in rows_to_insert[0]])
-                insert_sql = f"INSERT INTO {target_schema}.{table_name} ({column_list}) VALUES ({placeholders})"
+                insert_sql = f"INSERT INTO {target_schema}.{table_name} WITH (TABLOCK) ({column_list}) VALUES ({placeholders})"
 
                 stop_progress = threading.Event()
 
