@@ -844,3 +844,123 @@ table info and only see the generated SQL, or add `--execute-sql` to run the gen
     --execute-sql \
     email country_id id first_name last_name is_active created_at
 ```
+
+## Import a CSV File
+
+`mssql_import_csv.py` bulk imports a CSV file into an existing table (or creates the table first from a table
+definition JSON file, see [Copy a Table via CSV Export/Import](#copy-a-table-via-csv-exportimport)).
+It uses the same performance optimizations as `mssql_copy_table.py`: maximum TDS packet size, `fast_executemany`, `INSERT ... WITH (TABLOCK)` and a commit after each
+page of `--page-size` rows (default `50000`). The CSV file is streamed, so large files do not need to fit into memory.
+
+Database, authentication and table are specified the same way as for `mssql_reorder_columns.py` (`--table` may be
+schema-qualified, default schema is `dbo`).
+
+* The first line of the CSV file must contain the column names. They are matched case-insensitively to the table
+  columns, the order does not matter. A CSV column that does not exist in the table aborts the import. Table columns
+  missing in the CSV get their default value (or `NULL`).
+* If the CSV contains the identity column, `IDENTITY_INSERT` is enabled, so the identity values from the file are kept.
+* Values are converted according to the column type: integer, decimal/numeric/money, float/real, bit (`1`/`0`,
+  `true`/`false`, `yes`/`no`), date/datetime/datetime2/time in ISO format (e.g. `2026-01-31 13:45:00`) and binary as
+  hex (optionally prefixed with `0x`). All other types are passed as string and converted by SQL Server.
+* An unquoted empty field (`a,,b`) is imported as `NULL`. A quoted empty field (`a,"",b`) is imported as empty string
+  for character columns and as `NULL` for all other columns.
+
+```bash
+./mssql_import_csv.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --table dbo.User \
+    --file users.csv \
+    --delimiter ';'
+```
+
+### Truncate or delete rows before the import
+
+`--truncate` truncates the table before the import (default `False`). `--delete-where` deletes all rows matching the
+given where clause before the import, so a partial import can be executed repeatedly:
+
+```bash
+./mssql_import_csv.py \
+    --server xyzserver.database.windows.net \
+    --db azure-db \
+    --authentication AzureActiveDirectory \
+    --table MYSCHEMA.Sales \
+    --file sales_2026.csv \
+    --delete-where "sales_year = 2026"
+```
+
+### Auto-Resume an Interrupted Import
+
+As every page is committed on its own, an interrupted import leaves the rows of all completed pages in the table.
+`--auto-resume` takes the current row count of the table as the number of CSV rows already imported, skips that many
+data rows of the CSV file and imports the rest. Just re-run the same command with `--auto-resume` added.
+
+This only works if the table was empty before the first import (e.g. use `--truncate` for the first run) and the CSV
+file did not change in between. `--auto-resume` cannot be combined with `--truncate` or `--delete-where`.
+
+## Export a Table to CSV
+
+`mssql_export_csv.py` exports the rows of a table into a CSV file and writes the table definition into an additional
+JSON file. Database, authentication and table are specified the same way as for `mssql_import_csv.py`. Use `--where` to
+export only some rows. The JSON file is written next to the CSV file with extension `.json` (use `--json-file` to write
+it somewhere else).
+
+```bash
+./mssql_export_csv.py \
+    --server xyzserver.database.windows.net \
+    --db azure-db \
+    --authentication AzureActiveDirectory \
+    --table MYSCHEMA.Sales \
+    --file sales_2026.csv \
+    --where "sales_year = 2026"
+```
+
+The CSV file has the column names in its first line. All values are quoted, `NULL` is written as unquoted empty field,
+so `NULL` and empty strings can be distinguished on import. Dates/times are written in ISO format, binary values as hex
+with prefix `0x`. `rowversion`/`timestamp` columns are not exported, as SQL Server generates their values.
+
+The JSON file contains the table definition: columns (type, length/precision/scale, nullability, default value,
+identity seed/increment), primary key and unique constraints, check constraints, indexes (unique, clustered, included
+columns, filter) and foreign keys.
+
+## Copy a Table via CSV Export/Import
+
+Export and import together copy a table including its definition from one system to another, e.g. when there is no
+direct connection between the two databases. Pass the JSON file to `mssql_import_csv.py` with `--create-table`:
+
+```bash
+./mssql_export_csv.py \
+    --server xyzserver.database.windows.net \
+    --db azure-db \
+    --authentication AzureActiveDirectory \
+    --table MYSCHEMA.Sales \
+    --file sales.csv
+
+./mssql_import_csv.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --table OTHERSCHEMA.Sales \
+    --file sales.csv \
+    --create-table sales.json
+```
+
+If the table does not exist yet, it is created with its columns, default values, identity, primary key/unique and check
+constraints. If the target table name differs from the exported one, the exported table name is replaced by the target
+table name in constraint and index names (e.g. `PK_Sales` -> `PK_Sales2`), as constraint names must be unique within a
+schema. After the import, all indexes and foreign keys of the definition that do not exist yet are created
+(creating indexes after the import is faster than maintaining them during the import). Foreign keys referencing a
+table in the exported table's schema are redirected to the target schema (like `mssql_copy_table.py` does). If a
+foreign key cannot be created (e.g. the referenced table does not exist yet), an error is printed and the import
+continues.
+
+If the table already exists, it is not changed, only missing indexes and foreign keys are added after the import. So
+`--create-table` can be combined with `--truncate`, `--delete-where` and `--auto-resume`, e.g. to re-run an interrupted
+import.
+
+Limitations: computed columns are created as regular columns, triggers and permissions are not copied, default
+constraints get system-generated names, and `datetime2`/`time`/`datetimeoffset` values with more than 6 fractional
+digits are truncated to microseconds (except `datetimeoffset`, which keeps all 7 digits).
