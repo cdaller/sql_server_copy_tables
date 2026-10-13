@@ -8,7 +8,7 @@ import json
 import os
 from time import perf_counter
 
-from mssql_import_csv import create_connection
+from mssql_import_csv import create_connection, Progress
 from mssql_reorder_columns import get_column_info, get_key_constraints, get_indexes, get_check_constraints, get_foreign_keys
 
 # column keys in the order of the rows returned by mssql_reorder_columns.get_column_info
@@ -78,10 +78,14 @@ def format_value(value):
 
 def export_csv(connection, schema, table, column_names, where_clause, file, delimiter, encoding, page_size):
     column_list = ', '.join(f'[{c}]' for c in column_names)
-    sql = f"SELECT {column_list} FROM [{schema}].[{table}]" + (f" WHERE {where_clause}" if where_clause else '')
+    where_sql = f" WHERE {where_clause}" if where_clause else ''
 
-    start_time = perf_counter()
-    total_rows = 0
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT COUNT_BIG(*) FROM [{schema}].[{table}]{where_sql}")
+        total_rows = cursor.fetchone()[0]
+    print(f" {total_rows:_} rows ...", end="", flush=True)
+
+    progress = Progress(total_rows)
     page_count = 0
 
     with connection.cursor() as cursor, open(file, 'w', newline='', encoding=encoding) as f:
@@ -90,7 +94,7 @@ def export_csv(connection, schema, table, column_names, where_clause, file, deli
         writer = csv.writer(f, delimiter=delimiter, quoting=csv.QUOTE_NOTNULL)
         writer.writerow(column_names)
 
-        cursor.execute(sql)
+        cursor.execute(f"SELECT {column_list} FROM [{schema}].[{table}]{where_sql}")
         while True:
             start_time_page = perf_counter()
             rows = cursor.fetchmany(page_size)
@@ -98,12 +102,9 @@ def export_csv(connection, schema, table, column_names, where_clause, file, deli
                 break
             writer.writerows([format_value(v) for v in row] for row in rows)
             page_count += 1
-            total_rows += len(rows)
-            print(f" {page_count}r({perf_counter() - start_time_page:.1f}s, {total_rows:_} rows)", end="", flush=True)
+            progress.page_done(len(rows), f" {page_count}r({perf_counter() - start_time_page:.1f}s)")
 
-    duration_sec = perf_counter() - start_time
-    rows_per_sec = int(round(total_rows / duration_sec)) if duration_sec > 0 else 0
-    print(f" - done: {total_rows:_} rows in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+    progress.done()
 
 
 def main():

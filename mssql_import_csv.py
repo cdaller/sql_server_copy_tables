@@ -14,7 +14,7 @@ import csv
 import json
 import re
 from decimal import Decimal
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from time import perf_counter
 
 from mssql_reorder_columns import format_column_def, format_key_constraint_sql, format_check_constraint_sql, format_index_sql, format_foreign_key_sql
@@ -250,7 +250,63 @@ def get_row_count(connection, schema, table) -> int:
         return cursor.fetchone()[0]
 
 
-def import_csv(connection, schema, table, csv_columns, reader, page_size, skip_rows=0):
+def format_duration(seconds):
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+class Progress:
+    """Prints per page progress and an ETA (like mssql_copy_table.py). The ETA is the *mutable tail* of the output,
+    it is erased and reprinted in place after each page without touching the output of earlier pages."""
+
+    def __init__(self, total_rows):
+        self.total_rows = total_rows
+        self.rows_done = 0
+        self.start_time = perf_counter()
+        self.start_datetime = datetime.now()
+        self.tail_len = 0
+
+    def erase_tail(self):
+        if self.tail_len:
+            print('\b' * self.tail_len + ' ' * self.tail_len + '\b' * self.tail_len, end="", flush=True)
+            self.tail_len = 0
+
+    def page_done(self, rows, msg):
+        self.rows_done += rows
+        self.erase_tail()
+        print(msg, end="", flush=True)
+        elapsed = perf_counter() - self.start_time
+        rows_remaining = self.total_rows - self.rows_done
+        if rows_remaining > 0 and self.rows_done > 0:
+            remaining_sec = elapsed / self.rows_done * rows_remaining
+            # anchor to the fixed start time (not datetime.now()) so the ETA stays stable
+            eta = self.start_datetime + timedelta(seconds=elapsed + remaining_sec)
+            tail = f" ETA {eta:%H:%M:%S} ({format_duration(remaining_sec)})"
+            print(tail, end="", flush=True)
+            self.tail_len = len(tail)
+
+    def done(self):
+        self.erase_tail()
+        duration_sec = perf_counter() - self.start_time
+        rows_per_sec = int(round(self.rows_done / duration_sec)) if duration_sec > 0 else 0
+        print(f" - done: {self.rows_done:_} rows in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+
+
+def count_csv_rows(file, encoding, delimiter) -> int:
+    """Count the data rows of the CSV file (without header and empty lines). Uses the csv reader, so quoted values
+    containing line breaks are counted correctly."""
+    with open(file, newline='', encoding=encoding) as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        next(reader, None)
+        return sum(1 for row in reader if row)
+
+
+def import_csv(connection, schema, table, csv_columns, reader, page_size, total_rows, skip_rows=0):
     full_table = f'[{schema}].[{table}]'
     column_list = ', '.join(f'[{c.column_name}]' for c in csv_columns)
     placeholders = ', '.join('?' for _ in csv_columns)
@@ -260,8 +316,7 @@ def import_csv(connection, schema, table, csv_columns, reader, page_size, skip_r
     is_char = [c.type_name in CHAR_TYPES for c in csv_columns]
     has_identity = any(c.is_identity for c in csv_columns)
 
-    start_time = perf_counter()
-    total_rows = 0
+    progress = Progress(total_rows - skip_rows)
     page_count = 0
 
     with connection.cursor() as cursor:
@@ -285,26 +340,23 @@ def import_csv(connection, schema, table, csv_columns, reader, page_size, skip_r
             page.append(convert_row(row, converters, is_char, line_number))
             if len(page) >= page_size:
                 page_count += 1
-                total_rows += insert_page(connection, cursor, insert_sql, page, page_count, total_rows, start_time)
+                insert_page(connection, cursor, insert_sql, page, page_count, progress)
                 page = []
         if page:
             page_count += 1
-            total_rows += insert_page(connection, cursor, insert_sql, page, page_count, total_rows, start_time)
+            insert_page(connection, cursor, insert_sql, page, page_count, progress)
 
         if has_identity:
             cursor.execute(f"SET IDENTITY_INSERT {full_table} OFF")
 
-    duration_sec = perf_counter() - start_time
-    rows_per_sec = int(round(total_rows / duration_sec)) if duration_sec > 0 else 0
-    print(f" - done: {total_rows:_} rows in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+    progress.done()
 
 
-def insert_page(connection, cursor, insert_sql, page, page_count, rows_before, start_time):
+def insert_page(connection, cursor, insert_sql, page, page_count, progress):
     start_time_page = perf_counter()
     cursor.executemany(insert_sql, page)
     connection.commit()
-    print(f" {page_count}w({perf_counter() - start_time_page:.1f}s, {rows_before + len(page):_} rows)", end="", flush=True)
-    return len(page)
+    progress.page_done(len(page), f" {page_count}w({perf_counter() - start_time_page:.1f}s)")
 
 
 def main():
@@ -365,7 +417,9 @@ def main():
                 print(f"Auto-resume: table already contains {skip_rows:_} rows, skipping the first {skip_rows:_} CSV rows")
 
             print(f"Importing {ARGS.file} into {schema}.{table} ({len(csv_columns)} columns, page size {ARGS.page_size:_})...", end="", flush=True)
-            import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, skip_rows)
+            total_rows = count_csv_rows(ARGS.file, ARGS.encoding, ARGS.delimiter)
+            print(f" {total_rows:_} rows{f' ({total_rows - skip_rows:_} to import)' if skip_rows else ''} ...", end="", flush=True)
+            import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows)
 
         if definition:
             create_indexes_and_foreign_keys(connection, schema, table, definition)
