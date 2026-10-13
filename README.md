@@ -891,6 +891,44 @@ given where clause before the import, so a partial import can be executed repeat
     --delete-where "sales_year = 2026"
 ```
 
+### Upsert: Update Existing Rows and Insert New Rows
+
+With `--upsert`, rows that already exist in the table are updated and all other rows are inserted. Rows are matched by
+the primary key of the table definition, so `--upsert` requires `--create-table JSON_FILE` (see
+[Copy a Table via CSV Export/Import](#copy-a-table-via-csv-exportimport)):
+
+```bash
+./mssql_import_csv.py \
+    --server localhost \
+    --db my-db \
+    --user xxx \
+    --password xxx \
+    --table MYSCHEMA.Sales \
+    --file sales.csv \
+    --create-table sales.json \
+    --upsert
+```
+
+For each page, the rows are bulk loaded into a temporary staging table, then the existing rows are updated and the new
+rows inserted with one `UPDATE` and one `INSERT` statement in a single transaction. Only rows where at least one
+non-key column of the CSV file differs are updated (`NULL` is treated as equal to `NULL`; if the CSV contains columns of
+type `text`, `ntext`, `image`, `xml`, `geography` or `geometry`, all matching rows are updated). The output shows how
+many rows were inserted, updated and unchanged:
+
+```
+... - done: 138_690 rows (1_967 inserted, 600 updated, 136_123 unchanged) in 12.5 seconds (11_125 rows/sec)
+```
+
+* The import stops with an error if the table definition has no primary key, the table's primary key has different
+  columns, or a primary key column is missing in the CSV file.
+* A primary key that occurs twice within one page aborts the import (nothing of that page is written). If it occurs in
+  different pages, the later row wins.
+* Table columns that are not in the CSV file are neither compared nor updated. Identity columns that are not part of
+  the primary key are only written for inserted rows.
+* Rows of the table that are not in the CSV file are not deleted.
+* `--upsert` cannot be combined with `--truncate` or `--auto-resume`. An interrupted upsert can simply be re-run with
+  the same command, already imported rows are then reported as unchanged.
+
 ### Auto-Resume an Interrupted Import
 
 As every page is committed on its own, an interrupted import leaves the rows of all completed pages in the table.

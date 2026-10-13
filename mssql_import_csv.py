@@ -26,6 +26,10 @@ DECIMAL_TYPES = {'decimal', 'numeric', 'money', 'smallmoney'}
 FLOAT_TYPES = {'float', 'real'}
 DATETIME_TYPES = {'datetime', 'datetime2', 'smalldatetime'}
 CHAR_TYPES = {'char', 'varchar', 'nchar', 'nvarchar', 'text', 'ntext'}
+# types that cannot be compared (e.g. with EXCEPT) to detect changed rows on upsert
+NOT_COMPARABLE_TYPES = {'text', 'ntext', 'image', 'xml', 'geography', 'geometry'}
+
+STAGING_TABLE = '#upsert_staging'
 
 # column keys in the order of the rows returned by mssql_reorder_columns.get_column_info
 COLUMN_KEYS = ['name', 'type_name', 'max_length', 'precision', 'scale', 'is_nullable', 'column_id',
@@ -45,6 +49,7 @@ def parse_args():
     parser.add_argument('--delimiter', dest='delimiter', default=',', help='CSV field delimiter (default: %(default)s)')
     parser.add_argument('--encoding', dest='encoding', default='utf-8-sig', help='CSV file encoding (default: %(default)s)')
     parser.add_argument('--create-table', dest='create_table', metavar='JSON_FILE', help='create the table from the table definition JSON file written by mssql_export_csv.py if it does not exist yet; indexes and foreign keys are created after the import')
+    parser.add_argument('--upsert', dest='upsert', default=False, action=argparse.BooleanOptionalAction, help='update rows that already exist (matched by the primary key of the table definition given by --create-table) and insert the others; rows without changes are not updated (default: %(default)s)')
     parser.add_argument('--page-size', dest='page_size', type=int, default=50000, help='number of rows inserted and committed per page (default: %(default)s)')
     before_import = parser.add_mutually_exclusive_group()
     before_import.add_argument('--truncate', dest='truncate', default=False, action=argparse.BooleanOptionalAction, help='truncate the table before the import (default: %(default)s)')
@@ -362,11 +367,11 @@ class Progress:
             print(tail, end="", flush=True)
             self.tail_len = len(tail)
 
-    def done(self):
+    def done(self, details=None):
         self.erase_tail()
         duration_sec = perf_counter() - self.start_time
         rows_per_sec = int(round(self.rows_done / duration_sec)) if duration_sec > 0 else 0
-        print(f" - done: {self.rows_done:_} rows in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+        print(f" - done: {self.rows_done:_} rows{f' ({details})' if details else ''} in {duration_sec:.1f} seconds ({rows_per_sec:_} rows/sec)")
 
 
 def count_csv_rows(file, encoding, delimiter) -> int:
@@ -378,11 +383,73 @@ def count_csv_rows(file, encoding, delimiter) -> int:
         return sum(1 for row in reader if row)
 
 
-def import_csv(connection, schema, table, csv_columns, reader, page_size, total_rows, skip_rows=0):
+def get_upsert_key_columns(connection, schema, table, definition, csv_columns, definition_file):
+    """Return the primary key columns of the table definition (with the table's column names). Exits if the table
+    definition has no primary key, the table's primary key differs or a key column is not in the CSV file."""
+    primary_key = next((kc for kc in definition['key_constraints'] if kc['is_primary_key']), None)
+    if primary_key is None:
+        print(f"ERROR: --upsert needs a primary key, but the table definition in {definition_file} has none.", file=sys.stderr)
+        sys.exit(1)
+    key_names = [name.lower() for name, _ in primary_key['columns']]
+
+    table_primary_key = next((kc for kc in get_key_constraints(connection, schema, table) if kc['is_primary_key']), None)
+    table_key_names = [name.lower() for name, _ in table_primary_key['columns']] if table_primary_key else []
+    if sorted(key_names) != sorted(table_key_names):
+        print(f"ERROR: primary key of table {schema}.{table} ({', '.join(table_key_names) or 'none'}) differs from the "
+              f"primary key in the table definition ({', '.join(key_names)}).", file=sys.stderr)
+        sys.exit(1)
+
+    csv_columns_by_name = {c.column_name.lower(): c for c in csv_columns}
+    missing = [name for name in key_names if name not in csv_columns_by_name]
+    if missing:
+        print(f"ERROR: --upsert needs all primary key columns in the CSV file, missing: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+    return [csv_columns_by_name[name].column_name for name in key_names]
+
+
+def get_upsert_statements(full_table, csv_columns, key_columns):
+    """Return the SQL statements to create the staging table, load a page into it, update changed rows and insert new
+    rows from the staging table into the target table."""
+    column_list = ', '.join(f'[{c.column_name}]' for c in csv_columns)
+    placeholders = ', '.join('?' for _ in csv_columns)
+    key_join = ' AND '.join(f't.[{k}] = s.[{k}]' for k in key_columns)
+    # identity columns cannot be updated (an identity column in the primary key is used for matching only)
+    update_columns = [c for c in csv_columns if c.column_name not in key_columns and not c.is_identity]
+    skipped_identity = [c.column_name for c in csv_columns if c.column_name not in key_columns and c.is_identity]
+    if skipped_identity:
+        print(f"WARNING: identity column(s) {', '.join(skipped_identity)} cannot be updated, only used for inserted rows", file=sys.stderr)
+
+    update_sql = None
+    if update_columns:
+        set_list = ', '.join(f't.[{c.column_name}] = s.[{c.column_name}]' for c in update_columns)
+        update_sql = f"UPDATE t SET {set_list} FROM {full_table} t JOIN {STAGING_TABLE} s ON {key_join}"
+        if not any(c.type_name in NOT_COMPARABLE_TYPES for c in update_columns):
+            # only update rows that actually changed (EXCEPT compares NULL values as equal)
+            source_list = ', '.join(f's.[{c.column_name}]' for c in update_columns)
+            target_list = ', '.join(f't.[{c.column_name}]' for c in update_columns)
+            update_sql += f" WHERE EXISTS (SELECT {source_list} EXCEPT SELECT {target_list})"
+
+    return {
+        # SELECT INTO keeps types and collations of the target columns, the UNION drops the identity property
+        'create': [f"SELECT TOP 0 {column_list} INTO {STAGING_TABLE} FROM {full_table} UNION ALL SELECT TOP 0 {column_list} FROM {full_table}",
+                   f"ALTER TABLE {STAGING_TABLE} ADD PRIMARY KEY ({', '.join(f'[{k}]' for k in key_columns)})"],
+        'load': f"INSERT INTO {STAGING_TABLE} ({column_list}) VALUES ({placeholders})",
+        'update': update_sql,
+        'insert': (f"INSERT INTO {full_table} WITH (TABLOCK) ({column_list}) SELECT {column_list} FROM {STAGING_TABLE} s "
+                   f"WHERE NOT EXISTS (SELECT 1 FROM {full_table} t WHERE {key_join})"),
+        'truncate': f"TRUNCATE TABLE {STAGING_TABLE}",
+        'drop': f"DROP TABLE {STAGING_TABLE}",
+    }
+
+
+def import_csv(connection, schema, table, csv_columns, reader, page_size, total_rows, skip_rows=0, key_columns=None):
+    """Import the CSV rows page by page. With key_columns, existing rows are updated and new rows inserted (upsert)."""
     full_table = f'[{schema}].[{table}]'
     column_list = ', '.join(f'[{c.column_name}]' for c in csv_columns)
     placeholders = ', '.join('?' for _ in csv_columns)
     insert_sql = f"INSERT INTO {full_table} WITH (TABLOCK) ({column_list}) VALUES ({placeholders})"
+    upsert_statements = get_upsert_statements(full_table, csv_columns, key_columns) if key_columns else None
+    counts = {'inserted': 0, 'updated': 0}
 
     converters = [get_converter(c.type_name) for c in csv_columns]
     is_char = [c.type_name in CHAR_TYPES for c in csv_columns]
@@ -391,9 +458,18 @@ def import_csv(connection, schema, table, csv_columns, reader, page_size, total_
     progress = Progress(total_rows - skip_rows)
     page_count = 0
 
-    with connection.cursor() as cursor:
+    with connection.cursor() as cursor, connection.cursor() as sql_cursor:
         if has_identity:
             cursor.execute(f"SET IDENTITY_INSERT {full_table} ON")
+        if upsert_statements:
+            for sql in upsert_statements['create']:
+                sql_cursor.execute(sql)
+
+        def write_page(page, page_count):
+            if upsert_statements:
+                upsert_page(connection, cursor, sql_cursor, upsert_statements, page, page_count, progress, counts)
+            else:
+                insert_page(connection, cursor, insert_sql, page, page_count, progress)
 
         cursor.fast_executemany = True
         cursor.setinputsizes(get_input_sizes(csv_columns))
@@ -412,16 +488,23 @@ def import_csv(connection, schema, table, csv_columns, reader, page_size, total_
             page.append(convert_row(row, converters, is_char, line_number))
             if len(page) >= page_size:
                 page_count += 1
-                insert_page(connection, cursor, insert_sql, page, page_count, progress)
+                write_page(page, page_count)
                 page = []
         if page:
             page_count += 1
-            insert_page(connection, cursor, insert_sql, page, page_count, progress)
+            write_page(page, page_count)
 
         if has_identity:
             cursor.execute(f"SET IDENTITY_INSERT {full_table} OFF")
+        if upsert_statements:
+            sql_cursor.execute(upsert_statements['drop'])
+            connection.commit()
 
-    progress.done()
+    if upsert_statements:
+        unchanged = progress.rows_done - counts['inserted'] - counts['updated']
+        progress.done(f"{counts['inserted']:_} inserted, {counts['updated']:_} updated, {unchanged:_} unchanged")
+    else:
+        progress.done()
 
 
 def insert_page(connection, cursor, insert_sql, page, page_count, progress):
@@ -431,9 +514,30 @@ def insert_page(connection, cursor, insert_sql, page, page_count, progress):
     progress.page_done(len(page), f" {page_count}w({perf_counter() - start_time_page:.1f}s)")
 
 
+def upsert_page(connection, cursor, sql_cursor, statements, page, page_count, progress, counts):
+    """Load the page into the staging table, update changed rows and insert new rows in one transaction."""
+    start_time_page = perf_counter()
+    try:
+        cursor.executemany(statements['load'], page)
+    except pyodbc.IntegrityError as e:
+        raise ValueError(f"page {page_count}: duplicate primary key in CSV file: {e}") from None
+    if statements['update']:
+        sql_cursor.execute(statements['update'])
+        counts['updated'] += sql_cursor.rowcount
+    sql_cursor.execute(statements['insert'])
+    counts['inserted'] += sql_cursor.rowcount
+    sql_cursor.execute(statements['truncate'])
+    connection.commit()
+    progress.page_done(len(page), f" {page_count}u({perf_counter() - start_time_page:.1f}s)")
+
+
 def main():
     parser = parse_args()
     ARGS = parser.parse_args()
+    if ARGS.upsert and not ARGS.create_table:
+        parser.error("--upsert requires --create-table (the primary key is taken from the table definition)")
+    if ARGS.upsert and (ARGS.truncate or ARGS.auto_resume):
+        parser.error("--upsert cannot be combined with --truncate or --auto-resume")
 
     if '.' in ARGS.table:
         schema, table = ARGS.table.split('.', 1)
@@ -482,6 +586,7 @@ def main():
                 print(f"ERROR: CSV file '{ARGS.file}' is empty.", file=sys.stderr)
                 sys.exit(1)
             csv_columns = map_columns(header, columns)
+            key_columns = get_upsert_key_columns(connection, schema, table, definition, csv_columns, ARGS.create_table) if ARGS.upsert else None
 
             if ARGS.truncate:
                 truncate_table(connection, schema, table)
@@ -493,10 +598,11 @@ def main():
                 skip_rows = get_row_count(connection, schema, table)
                 print(f"Auto-resume: table already contains {skip_rows:_} rows, skipping the first {skip_rows:_} CSV rows")
 
-            print(f"Importing {ARGS.file} into {schema}.{table} ({len(csv_columns)} columns, page size {ARGS.page_size:_})...", end="", flush=True)
+            print(f"{'Upserting' if key_columns else 'Importing'} {ARGS.file} into {schema}.{table} ({len(csv_columns)} columns, "
+                  f"{f'primary key {", ".join(key_columns)}, ' if key_columns else ''}page size {ARGS.page_size:_})...", end="", flush=True)
             total_rows = count_csv_rows(ARGS.file, ARGS.encoding, ARGS.delimiter)
             print(f" {total_rows:_} rows{f' ({total_rows - skip_rows:_} to import)' if skip_rows else ''} ...", end="", flush=True)
-            import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows)
+            import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows, key_columns)
 
         if definition:
             create_indexes_and_foreign_keys(connection, schema, table, definition)

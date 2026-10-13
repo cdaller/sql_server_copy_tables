@@ -572,7 +572,7 @@ def copy_data(source_conn, target_conn, source_schema, table_name, target_schema
 
         duration_sec = perf_counter() - start_time
         rows_per_sec = int(round(total_row_count / duration_sec))
-        print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec} rows/sec)")
+        print(f" - done in {duration_sec:.1f} seconds ({rows_per_sec:_} rows/sec)")
 
 def delete_data(connection, schema_name, table_name, where_clause, joins, dry_run = False):
     print(f"Deleting data in table {table_name} using where clause \"{where_clause}\" {get_dry_run_text(dry_run)} ...", end="", flush=True)
