@@ -18,6 +18,7 @@ from datetime import date, datetime, time, timedelta
 from time import perf_counter
 
 from mssql_reorder_columns import format_column_def, format_key_constraint_sql, format_check_constraint_sql, format_index_sql, format_foreign_key_sql
+from mssql_reorder_columns import get_column_info as get_column_definitions, get_key_constraints, get_indexes, get_check_constraints, get_foreign_keys
 
 
 INT_TYPES = {'tinyint', 'smallint', 'int', 'bigint'}
@@ -25,6 +26,10 @@ DECIMAL_TYPES = {'decimal', 'numeric', 'money', 'smallmoney'}
 FLOAT_TYPES = {'float', 'real'}
 DATETIME_TYPES = {'datetime', 'datetime2', 'smalldatetime'}
 CHAR_TYPES = {'char', 'varchar', 'nchar', 'nvarchar', 'text', 'ntext'}
+
+# column keys in the order of the rows returned by mssql_reorder_columns.get_column_info
+COLUMN_KEYS = ['name', 'type_name', 'max_length', 'precision', 'scale', 'is_nullable', 'column_id',
+               'default_definition', 'is_identity', 'identity_seed', 'identity_incr']
 
 
 def parse_args():
@@ -161,6 +166,29 @@ def convert_row(row, converters, is_char, line_number):
     return tuple(values)
 
 
+def get_table_definition(connection, schema, table):
+    columns = []
+    for row in get_column_definitions(connection, schema, table):
+        column = dict(zip(COLUMN_KEYS, row))
+        column['is_nullable'] = bool(column['is_nullable'])
+        column['is_identity'] = bool(column['is_identity'])
+        # IDENT_SEED/IDENT_INCR return decimals, which are not JSON serializable
+        for key in ('identity_seed', 'identity_incr'):
+            if column[key] is not None:
+                column[key] = int(column[key])
+        columns.append(column)
+
+    return {
+        'schema': schema,
+        'table': table,
+        'columns': columns,
+        'key_constraints': get_key_constraints(connection, schema, table),
+        'indexes': get_indexes(connection, schema, table),
+        'check_constraints': get_check_constraints(connection, schema, table),
+        'foreign_keys': get_foreign_keys(connection, schema, table),
+    }
+
+
 def table_exists(connection, schema, table) -> bool:
     with connection.cursor() as cursor:
         cursor.execute("SELECT OBJECT_ID(?, 'U')", f'[{schema}].[{table}]')
@@ -183,8 +211,7 @@ def create_table(connection, schema, table, definition):
     full_table = f'[{schema}].[{table}]'
     print(f"Creating table {schema}.{table} from table definition...", end="", flush=True)
     col_defs = ',\n'.join(
-        format_column_def(tuple(c[k] for k in ('name', 'type_name', 'max_length', 'precision', 'scale', 'is_nullable', 'column_id',
-                                               'default_definition', 'is_identity', 'identity_seed', 'identity_incr')))
+        format_column_def(tuple(c[k] for k in COLUMN_KEYS))
         for c in definition['columns'])
     statements = [f"CREATE TABLE {full_table} (\n{col_defs}\n);"]
     statements += [format_key_constraint_sql(full_table, kc) for kc in definition['key_constraints']]
@@ -194,6 +221,53 @@ def create_table(connection, schema, table, definition):
             cursor.execute(sql)
     connection.commit()
     print(" - done")
+
+
+def get_ref_schema(fk, definition, schema):
+    """References into the exported table's schema are redirected to the target schema (like mssql_copy_table.py)."""
+    return schema if fk['ref_schema'] == definition['schema'] else fk['ref_schema']
+
+
+def compare_named(kind, expected, actual, suffix_missing=''):
+    """Compare two lists of named items (constraints, indexes, ...) by name and return the differences."""
+    differences = []
+    expected_by_name = {item['name'].lower(): item for item in expected}
+    actual_by_name = {item['name'].lower(): item for item in actual}
+    for key, item in expected_by_name.items():
+        other = actual_by_name.get(key)
+        if other is None:
+            differences.append(f"{kind} {item['name']}: missing in table{suffix_missing}")
+            continue
+        attrs = [f"{k} {item[k]!r} (definition) != {other.get(k)!r} (table)" for k in item if k != 'name' and item[k] != other.get(k)]
+        if attrs:
+            differences.append(f"{kind} {item['name']}: " + ', '.join(attrs))
+    for key, item in actual_by_name.items():
+        if key not in expected_by_name:
+            differences.append(f"{kind} {item['name']}: not in table definition")
+    return differences
+
+
+def compare_table_definition(connection, schema, table, definition):
+    """Compare the existing table with the table definition and return the differences."""
+    # JSON round trip converts tuples to lists, like in the table definition file
+    existing = json.loads(json.dumps(get_table_definition(connection, schema, table)))
+    foreign_keys = [dict(fk, ref_schema=get_ref_schema(fk, definition, schema)) for fk in definition['foreign_keys']]
+
+    differences = []
+    expected_columns = [dict(c) for c in definition['columns']]
+    for c in expected_columns + existing['columns']:
+        del c['column_id']
+    differences += compare_named('column', expected_columns, existing['columns'])
+    existing_names = {c['name'].lower() for c in existing['columns']}
+    expected_names = {c['name'].lower() for c in expected_columns}
+    if ([c['name'].lower() for c in expected_columns if c['name'].lower() in existing_names]
+            != [c['name'].lower() for c in existing['columns'] if c['name'].lower() in expected_names]):
+        differences.append("column order differs")
+    differences += compare_named('primary key/unique constraint', definition['key_constraints'], existing['key_constraints'])
+    differences += compare_named('check constraint', definition['check_constraints'], existing['check_constraints'])
+    differences += compare_named('index', definition['indexes'], existing['indexes'], ' (will be created after the import)')
+    differences += compare_named('foreign key', foreign_keys, existing['foreign_keys'], ' (will be created after the import)')
+    return differences
 
 
 def create_indexes_and_foreign_keys(connection, schema, table, definition):
@@ -215,10 +289,8 @@ def create_indexes_and_foreign_keys(connection, schema, table, definition):
             if cursor.fetchone():
                 continue
             print(f"Creating foreign key {fk['name']}...", end="", flush=True)
-            # references into the exported table's schema are redirected to the target schema (like mssql_copy_table.py)
-            ref_schema = schema if fk['ref_schema'] == definition['schema'] else fk['ref_schema']
             try:
-                cursor.execute(format_foreign_key_sql(full_table, f"[{ref_schema}].[{fk['ref_table']}]", fk))
+                cursor.execute(format_foreign_key_sql(full_table, f"[{get_ref_schema(fk, definition, schema)}].[{fk['ref_table']}]", fk))
                 connection.commit()
                 print(" - done")
             except pyodbc.Error as e:
@@ -390,6 +462,11 @@ def main():
                 definition = rename_constraints(json.load(f), table)
             if table_exists(connection, schema, table):
                 print(f"Table {schema}.{table} already exists, not creating it")
+                differences = compare_table_definition(connection, schema, table, definition)
+                if differences:
+                    print(f"WARNING: table {schema}.{table} differs from the table definition in {ARGS.create_table}:", file=sys.stderr)
+                    for difference in differences:
+                        print(f"  {difference}", file=sys.stderr)
             else:
                 create_table(connection, schema, table, definition)
 

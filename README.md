@@ -957,7 +957,9 @@ table in the exported table's schema are redirected to the target schema (like `
 foreign key cannot be created (e.g. the referenced table does not exist yet), an error is printed and the import
 continues.
 
-If the table already exists, it is not changed, only missing indexes and foreign keys are added after the import. So
+If the table already exists, it is not changed, only missing indexes and foreign keys are added after the import.
+The existing table is compared with the table definition and a warning is printed for every difference (missing,
+additional or different columns, column order, constraints, indexes and foreign keys); the import continues anyway. So
 `--create-table` can be combined with `--truncate`, `--delete-where` and `--auto-resume`, e.g. to re-run an interrupted
 import.
 
