@@ -413,17 +413,18 @@ def main():
                 print(f"ERROR: compare-columns-exclude column(s) not found in both tables: {', '.join(missing_exclude_columns)}", file=sys.stderr)
                 sys.exit(1)
             compare_columns = [c for c in compare_columns if c not in exclude]
-            if not compare_columns:
-                print("ERROR: no columns left to compare after applying --compare-columns-exclude.", file=sys.stderr)
-                sys.exit(1)
 
-        # ensure key columns are always fetched, compare columns without key columns (avoid duplicate columns in select)
+        # key columns are used to match rows, so they are identical by definition and never compared
+        # (they are still always fetched, first in the select)
         compare_only_columns = [c for c in compare_columns if c not in set(key_columns)]
+        if not compare_only_columns:
+            print("ERROR: no non-key columns left to compare.", file=sys.stderr)
+            sys.exit(1)
         select_columns = key_columns + compare_only_columns
         key_len = len(key_columns)
 
         print(f'comparing [{schema1}].[{table1}] to [{schema2}].[{table2}] using key column(s) {key_columns} '
-              f'and comparing column(s) {compare_columns} ...', flush=True)
+              f'and comparing column(s) {compare_only_columns} ...', flush=True)
 
         # when both tables live on the same connection, do the row matching in SQL (only keys and,
         # for the value comparison, small derived expressions are transferred) and only download the
