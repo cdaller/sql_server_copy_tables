@@ -374,13 +374,26 @@ class Progress:
         print(f" - done: {self.rows_done:_} rows{f' ({details})' if details else ''} in {duration_sec:.1f} seconds ({rows_per_sec:_} rows/sec)")
 
 
-def count_csv_rows(file, encoding, delimiter) -> int:
+def count_csv_rows(file, encoding, delimiter, expected_fields) -> int:
     """Count the data rows of the CSV file (without header and empty lines). Uses the csv reader, so quoted values
-    containing line breaks are counted correctly."""
+    containing line breaks are counted correctly. Raises a ValueError if rows do not have the expected number of fields,
+    so a malformed file is detected before any data is written."""
+    count = 0
+    bad_lines = []
     with open(file, newline='', encoding=encoding) as f:
         reader = csv.reader(f, delimiter=delimiter)
         next(reader, None)
-        return sum(1 for row in reader if row)
+        # line 1 is the header
+        for line_number, row in enumerate(reader, start=2):
+            if not row:
+                continue
+            count += 1
+            if len(row) != expected_fields:
+                bad_lines.append(f"line {line_number}: {len(row)} fields")
+    if bad_lines:
+        raise ValueError(f"{len(bad_lines):_} rows do not have the expected {expected_fields} fields: "
+                         f"{', '.join(bad_lines[:10])}{', ...' if len(bad_lines) > 10 else ''}")
+    return count
 
 
 def get_upsert_key_columns(connection, schema, table, definition, csv_columns, definition_file):
@@ -587,6 +600,7 @@ def main():
                 sys.exit(1)
             csv_columns = map_columns(header, columns)
             key_columns = get_upsert_key_columns(connection, schema, table, definition, csv_columns, ARGS.create_table) if ARGS.upsert else None
+            total_rows = count_csv_rows(ARGS.file, ARGS.encoding, ARGS.delimiter, len(csv_columns))
 
             if ARGS.truncate:
                 truncate_table(connection, schema, table)
@@ -600,7 +614,6 @@ def main():
 
             print(f"{'Upserting' if key_columns else 'Importing'} {ARGS.file} into {schema}.{table} ({len(csv_columns)} columns, "
                   f"{f'primary key {", ".join(key_columns)}, ' if key_columns else ''}page size {ARGS.page_size:_})...", end="", flush=True)
-            total_rows = count_csv_rows(ARGS.file, ARGS.encoding, ARGS.delimiter)
             print(f" {total_rows:_} rows{f' ({total_rows - skip_rows:_} to import)' if skip_rows else ''} ...", end="", flush=True)
             import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows, key_columns)
 
