@@ -45,8 +45,9 @@ def parse_args():
     parser.add_argument('--user', dest='user', help='username (for UsernamePassword auth)')
     parser.add_argument('--password', dest='password', help='password (for UsernamePassword auth)')
     parser.add_argument('--table', dest='table', required=True, help='table name, optionally schema-qualified (e.g. dbo.MyTable)')
-    parser.add_argument('--file', dest='file', required=True, help='CSV file to import (first line must contain the column names)')
+    parser.add_argument('--file', dest='files', nargs='+', required=True, metavar='FILE', help='one or more CSV files to import one after the other (first line of each file must contain the column names)')
     parser.add_argument('--delimiter', dest='delimiter', default=',', help='CSV field delimiter (default: %(default)s)')
+    parser.add_argument('--quoting', dest='quoting', default=True, action=argparse.BooleanOptionalAction, help='treat double quotes as CSV quote characters; with --no-quoting, double quotes are part of the values and all empty fields are imported as NULL (default: %(default)s)')
     parser.add_argument('--encoding', dest='encoding', default='utf-8-sig', help='CSV file encoding (default: %(default)s)')
     parser.add_argument('--create-table', dest='create_table', metavar='JSON_FILE', help='create the table from the table definition JSON file written by mssql_export_csv.py if it does not exist yet; indexes and foreign keys are created after the import')
     parser.add_argument('--upsert', dest='upsert', default=False, action=argparse.BooleanOptionalAction, help='update rows that already exist (matched by the primary key of the table definition given by --create-table) and insert the others; rows without changes are not updated (default: %(default)s)')
@@ -374,14 +375,14 @@ class Progress:
         print(f" - done: {self.rows_done:_} rows{f' ({details})' if details else ''} in {duration_sec:.1f} seconds ({rows_per_sec:_} rows/sec)")
 
 
-def count_csv_rows(file, encoding, delimiter, expected_fields) -> int:
+def count_csv_rows(file, encoding, delimiter, quoting, expected_fields) -> int:
     """Count the data rows of the CSV file (without header and empty lines). Uses the csv reader, so quoted values
     containing line breaks are counted correctly. Raises a ValueError if rows do not have the expected number of fields,
     so a malformed file is detected before any data is written."""
     count = 0
     bad_lines = []
     with open(file, newline='', encoding=encoding) as f:
-        reader = csv.reader(f, delimiter=delimiter)
+        reader = csv.reader(f, delimiter=delimiter, quoting=quoting)
         next(reader, None)
         # line 1 is the header
         for line_number, row in enumerate(reader, start=2):
@@ -391,7 +392,7 @@ def count_csv_rows(file, encoding, delimiter, expected_fields) -> int:
             if len(row) != expected_fields:
                 bad_lines.append(f"line {line_number}: {len(row)} fields")
     if bad_lines:
-        raise ValueError(f"{len(bad_lines):_} rows do not have the expected {expected_fields} fields: "
+        raise ValueError(f"{file}: {len(bad_lines):_} rows do not have the expected {expected_fields} fields: "
                          f"{', '.join(bad_lines[:10])}{', ...' if len(bad_lines) > 10 else ''}")
     return count
 
@@ -592,30 +593,47 @@ def main():
             print(f"ERROR: Table '{schema}.{table}' not found or has no columns.", file=sys.stderr)
             sys.exit(1)
 
-        with open(ARGS.file, newline='', encoding=ARGS.encoding) as f:
-            reader = csv.reader(f, delimiter=ARGS.delimiter, quoting=csv.QUOTE_NOTNULL)
-            header = next(reader, None)
+        quoting = csv.QUOTE_MINIMAL if ARGS.quoting else csv.QUOTE_NONE
+        # check all files before any data is written
+        imports = []
+        for file in ARGS.files:
+            with open(file, newline='', encoding=ARGS.encoding) as f:
+                header = next(csv.reader(f, delimiter=ARGS.delimiter, quoting=quoting), None)
             if not header:
-                print(f"ERROR: CSV file '{ARGS.file}' is empty.", file=sys.stderr)
+                print(f"ERROR: CSV file '{file}' is empty.", file=sys.stderr)
                 sys.exit(1)
             csv_columns = map_columns(header, columns)
             key_columns = get_upsert_key_columns(connection, schema, table, definition, csv_columns, ARGS.create_table) if ARGS.upsert else None
-            total_rows = count_csv_rows(ARGS.file, ARGS.encoding, ARGS.delimiter, len(csv_columns))
+            total_rows = count_csv_rows(file, ARGS.encoding, ARGS.delimiter, quoting, len(csv_columns))
+            imports.append((file, csv_columns, key_columns, total_rows))
 
-            if ARGS.truncate:
-                truncate_table(connection, schema, table)
-            if ARGS.delete_where:
-                delete_rows(connection, schema, table, ARGS.delete_where)
+        if ARGS.truncate:
+            truncate_table(connection, schema, table)
+        if ARGS.delete_where:
+            delete_rows(connection, schema, table, ARGS.delete_where)
 
-            skip_rows = 0
-            if ARGS.auto_resume:
-                skip_rows = get_row_count(connection, schema, table)
-                print(f"Auto-resume: table already contains {skip_rows:_} rows, skipping the first {skip_rows:_} CSV rows")
+        skip_total = 0
+        if ARGS.auto_resume:
+            skip_total = get_row_count(connection, schema, table)
+            print(f"Auto-resume: table already contains {skip_total:_} rows, skipping the first {skip_total:_} CSV rows")
 
-            print(f"{'Upserting' if key_columns else 'Importing'} {ARGS.file} into {schema}.{table} ({len(csv_columns)} columns, "
-                  f"{f'primary key {", ".join(key_columns)}, ' if key_columns else ''}page size {ARGS.page_size:_})...", end="", flush=True)
-            print(f" {total_rows:_} rows{f' ({total_rows - skip_rows:_} to import)' if skip_rows else ''} ...", end="", flush=True)
-            import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows, key_columns)
+        for file, csv_columns, key_columns, total_rows in imports:
+            # with auto-resume, the already imported rows are skipped across the files in the given order
+            skip_rows = min(skip_total, total_rows)
+            skip_total -= skip_rows
+            if skip_rows == total_rows and total_rows > 0:
+                print(f"Skipping {file}: all {total_rows:_} rows already imported")
+                continue
+            with open(file, newline='', encoding=ARGS.encoding) as f:
+                reader = csv.reader(f, delimiter=ARGS.delimiter, quoting=csv.QUOTE_NOTNULL if ARGS.quoting else csv.QUOTE_NONE)
+                next(reader, None)
+                if not ARGS.quoting:
+                    # without quoting, empty fields cannot be distinguished, all are imported as NULL
+                    reader = ([value or None for value in row] for row in reader)
+                print(f"{'Upserting' if key_columns else 'Importing'} {file} into {schema}.{table} ({len(csv_columns)} columns, "
+                      f"{f'primary key {", ".join(key_columns)}, ' if key_columns else ''}page size {ARGS.page_size:_})...", end="", flush=True)
+                print(f" {total_rows:_} rows{f' ({total_rows - skip_rows:_} to import)' if skip_rows else ''} ...", end="", flush=True)
+                import_csv(connection, schema, table, csv_columns, reader, ARGS.page_size, total_rows, skip_rows, key_columns)
 
         if definition:
             create_indexes_and_foreign_keys(connection, schema, table, definition)

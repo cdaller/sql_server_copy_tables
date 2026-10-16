@@ -864,6 +864,11 @@ schema-qualified, default schema is `dbo`).
   hex (optionally prefixed with `0x`). All other types are passed as string and converted by SQL Server.
 * An unquoted empty field (`a,,b`) is imported as `NULL`. A quoted empty field (`a,"",b`) is imported as empty string
   for character columns and as `NULL` for all other columns.
+* `--no-quoting` is for files whose values are not quoted: double quotes are then imported as part of the values
+  (e.g. `RISC. "B"`) instead of starting a quoted field, and all empty fields are imported as `NULL`.
+* `--file` accepts multiple CSV files (e.g. `--file sales_*.csv`), they are imported one after the other into the same
+  table. All files are checked (header and field counts) before any data is written. `--truncate` and `--delete-where`
+  are executed once before the first file, indexes and foreign keys (`--create-table`) are created after the last file.
 
 ```bash
 ./mssql_import_csv.py \
@@ -935,8 +940,11 @@ As every page is committed on its own, an interrupted import leaves the rows of 
 `--auto-resume` takes the current row count of the table as the number of CSV rows already imported, skips that many
 data rows of the CSV file and imports the rest. Just re-run the same command with `--auto-resume` added.
 
+With multiple files, the rows are skipped across the files in the given order, so pass the files in the same order
+as in the first run.
+
 This only works if the table was empty before the first import (e.g. use `--truncate` for the first run) and the CSV
-file did not change in between. `--auto-resume` cannot be combined with `--truncate` or `--delete-where`.
+files did not change in between. `--auto-resume` cannot be combined with `--truncate` or `--delete-where`.
 
 ## Export a Table to CSV
 
