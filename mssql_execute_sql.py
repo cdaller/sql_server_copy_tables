@@ -15,6 +15,8 @@ from datetime import datetime
 
 import sys, traceback
 import struct
+import csv
+import json
 import argparse
 import logging
 
@@ -27,6 +29,9 @@ def parse_args():
     parser.add_argument('--authentication', dest='authentication', default='UsernamePassword', help='source database authentication. Possible to use AzureActiveDirectory (default: %(default)s)')
     parser.add_argument('--user', dest='user', help='source database username, if authentication is set to UsenamePassword')
     parser.add_argument('--password', dest='password', help='source database password, if authentication is set to UsenamePassword')
+
+    parser.add_argument('--format', dest='format', choices=['csv', 'markdown', 'json', 'text'], default='csv', help='output format of query results (default: %(default)s)')
+    parser.add_argument('--delimiter', dest='delimiter', default=';', help='CSV field delimiter, only used with --format csv (default: %(default)s)')
 
     parser.add_argument('--debug-sql', dest='debug_sql', default = False, action='store_true', help='If enabled, prints sql statements. (default: %(default)d)')
 
@@ -44,7 +49,7 @@ def create_connection(config) -> pyodbc.Connection:
 
     if "authentication" in config and config["authentication"]  == 'AzureActiveDirectory':
         if not azure_identity_available:
-            print("For AzureActiveDirectory authentication, please install azure-identity first!")
+            print("For AzureActiveDirectory authentication, please install azure-identity first!", file=sys.stderr)
             sys.exit(-1)
 
         # Use the cli credential to get a token after the user has signed in via the Azure CLI 'az login' command.
@@ -56,19 +61,39 @@ def create_connection(config) -> pyodbc.Connection:
         tokenstruct = struct.pack("=i", len(tokenb)) + tokenb;
         SQL_COPT_SS_ACCESS_TOKEN = 1256 
         attrs_before = {SQL_COPT_SS_ACCESS_TOKEN:tokenstruct}
-        print(f'using authentication {config["authentication"]}...', end="")
+        print(f'using authentication {config["authentication"]}...', end="", file=sys.stderr)
 
     else:
         # username/password:    
         conn_str = conn_str + f';UID={config["user"]};PWD={config["password"]}'
-        print(f'using authentication username/password', end="")
+        print(f'using authentication username/password', end="", file=sys.stderr)
     
     return pyodbc.connect(conn_str, attrs_before = attrs_before)
 
-def execute_sql(connection, sql_commands):
+def print_rows(columns, rows, format, delimiter):
+    if format == 'csv':
+        writer = csv.writer(sys.stdout, delimiter=delimiter)
+        writer.writerow(columns)
+        writer.writerows(rows)
+    elif format == 'markdown':
+        def cell(value):
+            return '' if value is None else str(value).replace('|', '\\|').replace('\n', ' ')
+        print('| ' + ' | '.join(columns) + ' |')
+        print('|' + '|'.join('---' for _ in columns) + '|')
+        for row in rows:
+            print('| ' + ' | '.join(cell(value) for value in row) + ' |')
+    elif format == 'json':
+        # default=str handles datetime, Decimal, UUID, bytes etc.
+        print(json.dumps([dict(zip(columns, row)) for row in rows], indent=2, default=str, ensure_ascii=False))
+    else:
+        print(" | ".join(columns))
+        for row in rows:
+            print(" | ".join(str(value) for value in row))
+
+def execute_sql(connection, sql_commands, format='csv', delimiter=';'):
     cursor = connection.cursor()
     for sql_command in sql_commands:
-        print(f'executing SQL statement: {sql_command}', flush=True)
+        print(f'executing SQL statement: {sql_command}', flush=True, file=sys.stderr)
 
         start_time = perf_counter()
 
@@ -80,21 +105,18 @@ def execute_sql(connection, sql_commands):
             rows = cursor.fetchall()
             
             if rows:
-                print(f"Query returned {len(rows)} rows in {duration_sec:.1f}s", flush=True)
+                print(f"Query returned {len(rows)} rows in {duration_sec:.1f}s", flush=True, file=sys.stderr)
                 columns = [column[0] for column in cursor.description]
-                print(" | ".join(columns))
-                
-                for row in rows:
-                    print(" | ".join(str(value) for value in row))
+                print_rows(columns, rows, format, delimiter)
             else:
-                print("No rows found.")
+                print("No rows found.", file=sys.stderr)
         else:
             # For non-SELECT queries, you can check the row count for feedback
             affected_rows = cursor.rowcount
             if affected_rows >= 0:
-                print(f"Query executed successfully in {duration_sec:.1f}s. {affected_rows} rows affected.")
+                print(f"Query executed successfully in {duration_sec:.1f}s. {affected_rows} rows affected.", file=sys.stderr)
             else:
-                print(f"Query executed successfully in {duration_sec:.1f}s, but the number of affected rows is unknown ")
+                print(f"Query executed successfully in {duration_sec:.1f}s, but the number of affected rows is unknown ", file=sys.stderr)
         connection.commit()
             
     cursor.close()
@@ -103,7 +125,7 @@ def main():
     logging.basicConfig()
 
     current_datetime = datetime.now()
-    print(f'starting at {current_datetime.isoformat()}')
+    print(f'starting at {current_datetime.isoformat()}', file=sys.stderr)
 
     sql_logger = logging.getLogger('sql')
 
@@ -124,15 +146,15 @@ def main():
 
     connection = None
     try:
-        print(f'connecting to server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True)
+        print(f'connecting to server {source_config["server"]} db {source_config["database"]}... ', end="", flush=True, file=sys.stderr)
         connection = create_connection(source_config)
-        print(' - DONE')
+        print(' - DONE', file=sys.stderr)
 
-        execute_sql(connection, ARGS.sql_commands)
+        execute_sql(connection, ARGS.sql_commands, ARGS.format, ARGS.delimiter)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
-        traceback.print_exc(file=sys.stdout)
+        print(f"An error occurred: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     finally:
         if connection:
             connection.close()
